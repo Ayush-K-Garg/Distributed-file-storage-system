@@ -7,18 +7,18 @@ It supports chunk-based storage, replication, and fault-tolerant file retrieval 
 
 ## Table of Contents
 
-* [Overview](#overview)
-* [Architecture](#architecture)
-* [Features](#features)
-* [Storage Format](#storage-format)
-* [How It Works](#how-it-works)
-* [Getting Started](#getting-started)
-* [Compilation](#compilation)
-* [Execution](#execution)
-* [Project Structure](#project-structure)
-* [Future Improvements](#future-improvements)
-* [Learning Outcomes](#learning-outcomes)
-* [Author](#author)
+* Overview
+* Architecture
+* Features
+* Storage Format
+* How It Works
+* Getting Started
+* Compilation
+* Execution
+* Project Structure
+* Future Improvements
+* Learning Outcomes
+* Author
 
 ---
 
@@ -44,11 +44,16 @@ It is fully binary-safe and works with all file types including images, videos, 
 * Splits files into chunks
 * Uploads chunks to storage nodes
 * Downloads and reconstructs files
+* Supports **upload, download, and sync modes**
+
+---
 
 #### Metadata Server
 
 * Maintains mapping: file → chunk → node(s)
 * Handles registration and lookup requests
+
+---
 
 #### Storage Nodes
 
@@ -65,6 +70,8 @@ It is fully binary-safe and works with all file types including images, videos, 
 * Multi-file support
 * Binary-safe transfer
 * Custom TCP communication protocol
+* Command-based client (upload/download/sync)
+* Supports files from any folder path
 
 ---
 
@@ -76,6 +83,8 @@ Chunks are stored as:
 data/node1/file.txt_chunk_0.bin
 data/node2/image.jpg_chunk_1.bin
 ```
+
+This prevents overwriting and allows multiple files to coexist safely.
 
 ---
 
@@ -94,7 +103,7 @@ data/node2/image.jpg_chunk_1.bin
 
 1. Client requests metadata
 2. Receives chunk-to-node mapping
-3. Attempts retrieval from available nodes
+3. Attempts retrieval from available nodes (fault tolerant)
 4. Reconstructs the original file
 
 ---
@@ -139,22 +148,59 @@ g++ client/main.cpp common/services/FileChunker.cpp common/models/Chunk.cpp -o c
 .\meta
 ```
 
-### Step 2: Start Storage Nodes (separate terminals)
+---
+
+### Step 2: Start Storage Nodes (in separate terminals)
 
 ```bash
 .\node 9001 data/node1
 .\node 9002 data/node2
 ```
 
+---
+
 ### Step 3: Run Client
 
+#### Upload a file
+
 ```bash
-.\client_app file.txt
-
-or 
-
-.\client_app sample.pdf ... whatever file needed to be done
+.\client_app upload samples/file.pdf
 ```
+
+---
+
+#### Download a file
+
+```bash
+.\client_app download samples/file.pdf
+```
+
+---
+
+#### Upload + Download (Sync)
+
+```bash
+.\client_app sync samples/file.pdf
+```
+
+---
+
+## Notes
+
+* You can provide **file paths**, not just files in root directory
+  Example:
+
+```bash
+.\client_app upload samples/image.jpg
+```
+
+* Output file will be:
+
+```bash
+downloaded_image.jpg
+```
+
+* Ensure all servers are running before using the client
 
 ---
 
@@ -169,6 +215,7 @@ or
 │   ├── models/
 │   └── services/
 ├── data/
+├── samples/        ← (optional input files)
 └── README.md
 ```
 
@@ -176,12 +223,12 @@ or
 
 ## Future Improvements
 
-* Separate upload and download commands
-* Dynamic chunk sizing
-* Multithreading support
+* Dynamic chunk sizing (based on file size)
+* Multithreading support (parallel clients)
 * Heartbeat system for node health monitoring
 * Automatic node discovery
 * Parallel chunk upload/download
+* Persistent connections (performance improvement)
 * Cloud deployment support
 
 ---

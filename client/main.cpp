@@ -32,30 +32,53 @@ SOCKET connectToServer(int port) {
     return sock;
 }
 
+
+std::string extractFileName(const std::string& path) {
+    size_t pos = path.find_last_of("/\\");
+    if (pos == std::string::npos) return path;
+    return path.substr(pos + 1);
+}
+
 int main() {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2,2), &wsa);
 
-    if (__argc < 2) {
-    std::cout << "Usage: client_app <filename>\n";
-    return 1;
-}
+    if (__argc < 3) {
+        std::cout << "Usage:\n";
+        std::cout << "client_app upload <filepath>\n";
+        std::cout << "client_app download <filepath>\n";
+        std::cout << "client_app sync <filepath>\n";
+        return 1;
+    }
 
-std::string filename = __argv[1];
+    std::string mode = __argv[1];
+    std::string filepath = __argv[2];
+    std::string filename = extractFileName(filepath);  
 
-    // REGISTER
-    SOCKET metaSock = connectToServer(8001);
     FileChunker chunker(1024);
-auto chunks = chunker.split(filename);
 
-int numChunks = chunks.size();
+    std::vector<Chunk> chunks;
 
-std::string registerReq = "REGISTER " + filename + " " + std::to_string(numChunks);
-    send(metaSock, registerReq.c_str(), registerReq.size() + 1, 0);
-    closesocket(metaSock);
+   
+    // REGISTER (only for upload/sync)
+ 
+    if (mode == "upload" || mode == "sync") {
+        chunks = chunker.split(filepath);
+        int numChunks = chunks.size();
 
-    // GET METADATA
-    metaSock = connectToServer(8001);
+        SOCKET metaSock = connectToServer(8001);
+
+        std::string registerReq = "REGISTER " + filename + " " + std::to_string(numChunks);
+        send(metaSock, registerReq.c_str(), registerReq.size() + 1, 0);
+
+        closesocket(metaSock);
+    }
+
+  
+    //  GET METADATA (always needed)
+
+    SOCKET metaSock = connectToServer(8001);
+
     std::string getReq = "GET " + filename;
     send(metaSock, getReq.c_str(), getReq.size() + 1, 0);
 
@@ -83,113 +106,117 @@ std::string registerReq = "REGISTER " + filename + " " + std::to_string(numChunk
     closesocket(metaSock);
 
   
+    //  UPLOAD
 
-   
-    //  UPLOAD (REPLICATION)
-    
-    for (auto &p : chunkMap) {
-        int chunkId = p.first;
-        auto &ports = p.second;
+    if (mode == "upload" || mode == "sync") {
+        for (auto &p : chunkMap) {
+            int chunkId = p.first;
+            auto &ports = p.second;
 
-        auto &chunk = chunks[chunkId];
+            auto &chunk = chunks[chunkId];
 
-        for (int port : ports) {
-            SOCKET sock = connectToServer(port);
-            if (sock < 0) continue;
+            for (int port : ports) {
+                SOCKET sock = connectToServer(port);
+                if (sock < 0) continue;
 
-            char cmd[10] = {0};
-            strcpy(cmd, "UPLOAD");
+                char cmd[10] = {0};
+                strcpy(cmd, "UPLOAD");
 
-            send(sock, cmd, 10, 0);
+                send(sock, cmd, 10, 0);
 
-          int nameLen = filename.size();
-send(sock, (char*)&nameLen, sizeof(nameLen), 0);
-send(sock, filename.c_str(), nameLen, 0);
+                int nameLen = filename.size();
+                send(sock, (char*)&nameLen, sizeof(nameLen), 0);
+                send(sock, filename.c_str(), nameLen, 0);
 
-int id = chunk.id;
-int size = chunk.data.size();
+                int id = chunk.id;
+                int size = chunk.data.size();
 
-send(sock, (char*)&id, sizeof(id), 0);
-send(sock, (char*)&size, sizeof(size), 0);
-send(sock, chunk.data.data(), size, 0);
+                send(sock, (char*)&id, sizeof(id), 0);
+                send(sock, (char*)&size, sizeof(size), 0);
+                send(sock, chunk.data.data(), size, 0);
 
-            closesocket(sock);
+                closesocket(sock);
 
-            std::cout << "Replicated chunk " << id 
-                      << " to port " << port << "\n";
+                std::cout << "Replicated chunk " << id 
+                          << " to port " << port << "\n";
+            }
         }
+
+        std::cout << "Upload complete\n";
     }
 
-    std::cout << "Upload complete\n";
+ 
+    //  DOWNLOAD
 
-  
-    //  DOWNLOAD (FAULT TOLERANT)
+    if (mode == "download" || mode == "sync") {
+        std::vector<Chunk> receivedChunks;
 
-    std::vector<Chunk> receivedChunks;
+        for (auto &p : chunkMap) {
+            int chunkId = p.first;
+            auto &ports = p.second;
 
-    for (auto &p : chunkMap) {
-        int chunkId = p.first;
-        auto &ports = p.second;
+            bool success = false;
 
-        bool success = false;
+            for (int port : ports) {
+                SOCKET sock = connectToServer(port);
+                if (sock < 0) continue;
 
-        for (int port : ports) {
-            SOCKET sock = connectToServer(port);
-            if (sock < 0) continue;
+                char cmd[10] = {0};
+                strcpy(cmd, "GET_CHUNK");
 
-            char cmd[10] = {0};
-            strcpy(cmd, "GET_CHUNK");
+                send(sock, cmd, 10, 0);
 
-            send(sock, cmd, 10, 0);
-            int nameLen = filename.size();
-send(sock, (char*)&nameLen, sizeof(nameLen), 0);
-send(sock, filename.c_str(), nameLen, 0);
+                int nameLen = filename.size();
+                send(sock, (char*)&nameLen, sizeof(nameLen), 0);
+                send(sock, filename.c_str(), nameLen, 0);
 
-send(sock, (char*)&chunkId, sizeof(chunkId), 0);
+                send(sock, (char*)&chunkId, sizeof(chunkId), 0);
 
-            int id;
+                int id;
 
-            if (!recvAll(sock, (char*)&id, sizeof(id))) {
+                if (!recvAll(sock, (char*)&id, sizeof(id))) {
+                    closesocket(sock);
+                    continue;
+                }
+
+                if (id == -1) {
+                    closesocket(sock);
+                    continue;
+                }
+
+                int size;
+                if (!recvAll(sock, (char*)&size, sizeof(size))) {
+                    closesocket(sock);
+                    continue;
+                }
+
+                std::vector<char> buffer(size);
+
+                if (!recvAll(sock, buffer.data(), size)) {
+                    closesocket(sock);
+                    continue;
+                }
+
+                receivedChunks.emplace_back(id, buffer);
+
+                std::cout << "Downloaded chunk " << id 
+                          << " from port " << port << "\n";
+
                 closesocket(sock);
-                continue;
+                success = true;
+                break;
             }
 
-            if (id == -1) {
-                closesocket(sock);
-                continue;
+            if (!success) {
+                std::cout << "Chunk " << chunkId << " failed on all replicas\n";
             }
-
-            int size;
-            if (!recvAll(sock, (char*)&size, sizeof(size))) {
-                closesocket(sock);
-                continue;
-            }
-
-            std::vector<char> buffer(size);
-
-            if (!recvAll(sock, buffer.data(), size)) {
-                closesocket(sock);
-                continue;
-            }
-
-            receivedChunks.emplace_back(id, buffer);
-
-            std::cout << "Downloaded chunk " << id 
-                      << " from port " << port << "\n";
-
-            closesocket(sock);
-            success = true;
-            break;
         }
 
-        if (!success) {
-            std::cout << "Chunk " << chunkId << " failed on all replicas\n";
-        }
+        std::string outputFile = "downloaded_" + filename;
+        chunker.merge(outputFile, receivedChunks);
+
+        std::cout << "File reconstructed as " << outputFile << "\n";
     }
-    std::string outputFile = "downloaded_" + filename;
-
-chunker.merge(outputFile, receivedChunks);
-    std::cout << "File reconstructed successfully\n";
 
     WSACleanup();
 }
