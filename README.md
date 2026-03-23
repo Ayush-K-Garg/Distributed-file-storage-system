@@ -1,7 +1,7 @@
 # Distributed File Storage System (C++)
 
 A distributed file storage system built in C++ using TCP sockets (Winsock).
-It supports chunk-based storage, replication, and fault-tolerant file retrieval across multiple nodes.
+It supports chunk-based storage, replication, multithreading, parallel transfer, and fault-tolerant file retrieval across multiple nodes.
 
 ---
 
@@ -15,6 +15,7 @@ It supports chunk-based storage, replication, and fault-tolerant file retrieval 
 * Getting Started
 * Compilation
 * Execution
+* Notes
 * Project Structure
 * Future Improvements
 * Learning Outcomes
@@ -29,36 +30,50 @@ This project demonstrates a distributed storage system where files are:
 * Split into chunks
 * Distributed across multiple storage nodes
 * Replicated for fault tolerance
+* Retrieved using fallback mechanisms
 * Reconstructed during download
 
-It is fully binary-safe and works with all file types including images, videos, and PDFs.
+The system is **binary-safe** and supports all file types including:
+
+* PDFs
+* Images
+* Videos
+* Large binary files
 
 ---
 
 ## Architecture
 
-### Components
-
-#### Client
+### Client
 
 * Splits files into chunks
 * Uploads chunks to storage nodes
 * Downloads and reconstructs files
-* Supports **upload, download, and sync modes**
+* Supports 3 modes:
+
+  * upload
+  * download
+  * sync (upload + download)
 
 ---
 
-#### Metadata Server
+### Metadata Server
 
-* Maintains mapping: file → chunk → node(s)
-* Handles registration and lookup requests
+* Maintains mapping:
+
+  file → chunk → [replica nodes]
+
+* Assigns nodes for chunk storage
+
+* Enables fault tolerance by returning multiple replicas
 
 ---
 
-#### Storage Nodes
+### Storage Nodes
 
 * Store chunks on disk
 * Serve chunk read/write requests
+* Multithreaded (handles multiple clients simultaneously)
 
 ---
 
@@ -67,11 +82,12 @@ It is fully binary-safe and works with all file types including images, videos, 
 * Chunk-based file storage
 * Distributed architecture
 * Replication for fault tolerance
+* Multithreaded storage nodes
 * Multi-file support
 * Binary-safe transfer
-* Custom TCP communication protocol
-* Command-based client (upload/download/sync)
-* Supports files from any folder path
+* Custom TCP protocol
+* Command-based client
+* File path support (not limited to root directory)
 
 ---
 
@@ -79,12 +95,14 @@ It is fully binary-safe and works with all file types including images, videos, 
 
 Chunks are stored as:
 
-```bash
-data/node1/file.txt_chunk_0.bin
-data/node2/image.jpg_chunk_1.bin
-```
+data/node1/file.pdf_chunk_0.bin
+data/node2/file.pdf_chunk_1.bin
 
-This prevents overwriting and allows multiple files to coexist safely.
+This ensures:
+
+* No overwriting across files
+* Proper separation of chunks
+* Support for multiple files simultaneously
 
 ---
 
@@ -93,9 +111,9 @@ This prevents overwriting and allows multiple files to coexist safely.
 ### Upload Flow
 
 1. Client splits file into chunks
-2. Sends metadata (file name and chunk count)
+2. Sends metadata (filename + chunk count)
 3. Metadata server assigns storage nodes
-4. Client uploads chunks to assigned nodes (with replication)
+4. Client uploads chunks (with replication)
 
 ---
 
@@ -103,8 +121,11 @@ This prevents overwriting and allows multiple files to coexist safely.
 
 1. Client requests metadata
 2. Receives chunk-to-node mapping
-3. Attempts retrieval from available nodes (fault tolerant)
-4. Reconstructs the original file
+3. For each chunk:
+
+   * tries replicas one by one
+4. Downloads chunks 
+5. Reconstructs original file
 
 ---
 
@@ -113,7 +134,7 @@ This prevents overwriting and allows multiple files to coexist safely.
 ### Prerequisites
 
 * Windows OS
-* g++ (MinGW or equivalent)
+* g++ (MinGW / MSYS2)
 * Winsock library (`ws2_32`)
 
 ---
@@ -122,21 +143,19 @@ This prevents overwriting and allows multiple files to coexist safely.
 
 ### Storage Node
 
-```bash
 g++ storage_node/StorageServer.cpp -o node -lws2_32
-```
+
+---
 
 ### Metadata Server
 
-```bash
 g++ metadata_server/MetadataServer.cpp -o meta -lws2_32
-```
+
+---
 
 ### Client
 
-```bash
 g++ client/main.cpp common/services/FileChunker.cpp common/models/Chunk.cpp -o client_app -lws2_32
-```
 
 ---
 
@@ -144,69 +163,53 @@ g++ client/main.cpp common/services/FileChunker.cpp common/models/Chunk.cpp -o c
 
 ### Step 1: Start Metadata Server
 
-```bash
 .\meta
-```
 
 ---
 
-### Step 2: Start Storage Nodes (in separate terminals)
+### Step 2: Start Storage Nodes (separate terminals)
 
-```bash
 .\node 9001 data/node1
 .\node 9002 data/node2
-```
 
 ---
 
 ### Step 3: Run Client
 
-#### Upload a file
+#### Upload
 
-```bash
 .\client_app upload samples/file.pdf
-```
 
 ---
 
-#### Download a file
+#### Download
 
-```bash
 .\client_app download samples/file.pdf
-```
 
 ---
 
-#### Upload + Download (Sync)
+#### Sync (Upload + Download)
 
-```bash
 .\client_app sync samples/file.pdf
-```
 
 ---
 
 ## Notes
 
-* You can provide **file paths**, not just files in root directory
-  Example:
+* You can use file paths:
 
-```bash
-.\client_app upload samples/image.jpg
-```
+.\client_app upload samples/video.mp4
 
-* Output file will be:
+* Output file:
 
-```bash
-downloaded_image.jpg
-```
+downloaded_video.mp4
 
-* Ensure all servers are running before using the client
+* Ensure all servers are running before execution
 
 ---
 
 ## Project Structure
 
-```bash
 .
 ├── client/
 ├── metadata_server/
@@ -215,21 +218,20 @@ downloaded_image.jpg
 │   ├── models/
 │   └── services/
 ├── data/
-├── samples/        ← (optional input files)
+├── samples/
 └── README.md
-```
 
 ---
 
 ## Future Improvements
 
 * Dynamic chunk sizing (based on file size)
-* Multithreading support (parallel clients)
-* Heartbeat system for node health monitoring
+* Heartbeat system for node health
 * Automatic node discovery
-* Parallel chunk upload/download
-* Persistent connections (performance improvement)
-* Cloud deployment support
+* Persistent TCP connections
+* Load balancing
+* Cloud deployment
+* File versioning
 
 ---
 
@@ -239,9 +241,10 @@ This project helps in understanding:
 
 * TCP socket programming
 * Distributed system design
-* Fault tolerance strategies
-* File I/O in C++
-* Client-server architecture
+* Replication strategies
+* Fault tolerance
+* Multithreading
+* Network protocol design
 
 ---
 

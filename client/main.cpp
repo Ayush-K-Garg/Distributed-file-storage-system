@@ -17,6 +17,16 @@ bool recvAll(SOCKET sock, char* buffer, int size) {
     return true;
 }
 
+bool sendAll(SOCKET sock, char* buffer, int size) {
+    int total = 0;
+    while (total < size) {
+        int sent = send(sock, buffer + total, size - total, 0);
+        if (sent <= 0) return false;
+        total += sent;
+    }
+    return true;
+}
+
 SOCKET connectToServer(int port) {
     SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -31,7 +41,6 @@ SOCKET connectToServer(int port) {
 
     return sock;
 }
-
 
 std::string extractFileName(const std::string& path) {
     size_t pos = path.find_last_of("/\\");
@@ -53,15 +62,13 @@ int main() {
 
     std::string mode = __argv[1];
     std::string filepath = __argv[2];
-    std::string filename = extractFileName(filepath);  
+    std::string filename = extractFileName(filepath);
 
     FileChunker chunker(1024);
-
     std::vector<Chunk> chunks;
 
-   
-    // REGISTER (only for upload/sync)
- 
+    // REGISTER
+
     if (mode == "upload" || mode == "sync") {
         chunks = chunker.split(filepath);
         int numChunks = chunks.size();
@@ -69,18 +76,17 @@ int main() {
         SOCKET metaSock = connectToServer(8001);
 
         std::string registerReq = "REGISTER " + filename + " " + std::to_string(numChunks);
-        send(metaSock, registerReq.c_str(), registerReq.size() + 1, 0);
+        sendAll(metaSock, (char*)registerReq.c_str(), registerReq.size() + 1); 
 
         closesocket(metaSock);
     }
 
-  
-    //  GET METADATA (always needed)
+    // GET METADATA
 
     SOCKET metaSock = connectToServer(8001);
 
     std::string getReq = "GET " + filename;
-    send(metaSock, getReq.c_str(), getReq.size() + 1, 0);
+    sendAll(metaSock, (char*)getReq.c_str(), getReq.size() + 1); 
 
     std::vector<std::pair<int, std::vector<int>>> chunkMap;
 
@@ -105,8 +111,7 @@ int main() {
 
     closesocket(metaSock);
 
-  
-    //  UPLOAD
+    // UPLOAD
 
     if (mode == "upload" || mode == "sync") {
         for (auto &p : chunkMap) {
@@ -122,18 +127,18 @@ int main() {
                 char cmd[10] = {0};
                 strcpy(cmd, "UPLOAD");
 
-                send(sock, cmd, 10, 0);
+                sendAll(sock, cmd, 10); 
 
                 int nameLen = filename.size();
-                send(sock, (char*)&nameLen, sizeof(nameLen), 0);
-                send(sock, filename.c_str(), nameLen, 0);
+                sendAll(sock, (char*)&nameLen, sizeof(nameLen)); 
+                sendAll(sock, (char*)filename.c_str(), nameLen); 
 
                 int id = chunk.id;
                 int size = chunk.data.size();
 
-                send(sock, (char*)&id, sizeof(id), 0);
-                send(sock, (char*)&size, sizeof(size), 0);
-                send(sock, chunk.data.data(), size, 0);
+                sendAll(sock, (char*)&id, sizeof(id)); 
+                sendAll(sock, (char*)&size, sizeof(size));
+                sendAll(sock, chunk.data.data(), size); 
 
                 closesocket(sock);
 
@@ -145,8 +150,7 @@ int main() {
         std::cout << "Upload complete\n";
     }
 
- 
-    //  DOWNLOAD
+    // DOWNLOAD
 
     if (mode == "download" || mode == "sync") {
         std::vector<Chunk> receivedChunks;
@@ -164,13 +168,13 @@ int main() {
                 char cmd[10] = {0};
                 strcpy(cmd, "GET_CHUNK");
 
-                send(sock, cmd, 10, 0);
+                sendAll(sock, cmd, 10); 
 
                 int nameLen = filename.size();
-                send(sock, (char*)&nameLen, sizeof(nameLen), 0);
-                send(sock, filename.c_str(), nameLen, 0);
+                sendAll(sock, (char*)&nameLen, sizeof(nameLen)); 
+                sendAll(sock, (char*)filename.c_str(), nameLen); 
 
-                send(sock, (char*)&chunkId, sizeof(chunkId), 0);
+                sendAll(sock, (char*)&chunkId, sizeof(chunkId)); 
 
                 int id;
 
