@@ -1,10 +1,10 @@
-# 🚀 Distributed High-Performance File Storage System (C++)
+#  Distributed High-Performance File Storage System (C++)
 
 A robust, self-healing, and multi-threaded distributed storage solution built in C++ using TCP sockets (**Winsock2**). This system achieves high-speed data transfer through parallel chunking, thread-pooling, and real-time monitoring. It is designed to be **fault-tolerant**, automatically handling node failures through a dynamic discovery and replication mechanism.
 
 ---
 
-## 📑 Table of Contents
+##  Table of Contents
 * [System Architecture](#-system-architecture)
 * [Key Technical Features](#-key-technical-features)
 * [Advanced Fault Tolerance](#-advanced-fault-tolerance)
@@ -19,7 +19,7 @@ A robust, self-healing, and multi-threaded distributed storage solution built in
 
 ---
 
-## 🏗️ System Architecture
+##  System Architecture
 
 The system consists of three primary components working in a decentralized cluster:
 
@@ -37,12 +37,12 @@ Independent worker processes that can be launched on any unique port. They handl
 
 ---
 
-## ⚡ Key Technical Features
+##  Key Technical Features
 
-### 🚀 Parallel Transfer Engine
+###  Parallel Transfer Engine
 Utilizes a custom **ThreadPool (8 Threads)** to bypass the limitations of sequential TCP. The system saturates available bandwidth by uploading/downloading multiple chunks simultaneously, reaching observed speeds of **670 MB/s** on local SSDs.
 
-### 📦 Dynamic Chunk Sizing
+###  Dynamic Chunk Sizing
 Analyzes file metadata to determine the most efficient segment size, balancing network overhead vs. metadata count:
 | File Size | Chunk Size | Strategy |
 | :--- | :--- | :--- |
@@ -54,24 +54,24 @@ Analyzes file metadata to determine the most efficient segment size, balancing n
 
 ---
 
-## 🛡️ Advanced Fault Tolerance
+##  Advanced Fault Tolerance
 
-### 🔄 Replication Factor ($RF=2$)
+###  Replication Factor ($RF=2$)
 During upload, every chunk is automatically duplicated across **two different storage nodes**. Even if one node crashes, the file remains 100% available for reconstruction.
 
-### ❤️ Heartbeat & Node Janitor
+###  Heartbeat & Node Janitor
 * **Push Heartbeat:** Storage nodes send a "KEEP-ALIVE" signal to the MetaServer every **2 seconds**.
 * **Janitor Thread:** A background process on the MetaServer that prunes any node that hasn't responded in **6 seconds**, ensuring the client never attempts to connect to a "dead" node.
 
-### 🔍 Dynamic Node Discovery
+### Dynamic Node Discovery
 The system is **plug-and-play**. New storage nodes can join the cluster at any time without restarting the MetaServer or re-compiling the client. The client fetches a fresh "Live List" before every operation.
 
-### 🛑 Intelligent Stall Detection
+###  Intelligent Stall Detection
 To prevent the client from hanging indefinitely during catastrophic node failures, the system monitors throughput. If chunk progress stops for **15 consecutive seconds**, the client gracefully terminates and reports a "Stall Error."
 
 ---
 
-## 📂 Storage Protocol
+##  Storage Protocol
 
 The custom TCP protocol utilizes a **Fixed-Header** approach for binary safety:
 1. **Command Header:** (10 bytes) - e.g., "UPLOAD", "GET_CHUNK"
@@ -82,7 +82,7 @@ The custom TCP protocol utilizes a **Fixed-Header** approach for binary safety:
 
 ---
 
-## 🛠️ Compilation & Execution
+##  Compilation & Execution
 
 ### **Compilation**
 Requires the Winsock library (`-lws2_32`) on Windows.
@@ -132,6 +132,8 @@ g++ client/main.cpp common/services/FileChunker.cpp common/models/Chunk.cpp -o c
 ```bash
 .\client_app sync samples/file.pdf
 ```
+
+
 
 ---
 
@@ -204,4 +206,51 @@ Architecture of Heartbeats, Replication (RF = 2), and Dynamic Discovery.
 Ayush Krishna Garg
 Focused on high-performance C++ backend systems, network programming, and distributed infrastructure.
 
+┌─────────────────────────────────────────────────────────┐
+       │                   CLIENT ORCHESTRATOR                   │
+       │  (File Splitter | ThreadPool | Parallel I/O | UI)       │
+       └──────────────┬───────────────────────────────▲──────────┘
+                      │                               │
+             1. REGISTER/GET_NODES            2. LIVE NODE LIST
+                      │                               │
+       ┌──────────────▼───────────────────────────────┴──────────┐
+       │                METADATA SERVER (Port 8001)              │
+       │    (Node Registry | Heartbeat Janitor | File Map)       │
+       └──────────────▲───────────────────────────────▲──────────┘
+                      │                               │
+             4. JOIN/HEARTBEAT                4. JOIN/HEARTBEAT
+                      │                               │
+       ┌──────────────┴──────────┐       ┌──────────────┴──────────┐
+       │   STORAGE NODE (9001)   │       │   STORAGE NODE (9002)   │
+       │ (Chunk A-1 | Chunk B-2) │       │ (Chunk A-2 | Chunk B-1) │
+       └──────────────▲──────────┘       └──────────────▲──────────┘
+                      │                               │
+                      └───────────────┬───────────────┘
+                                      │
+                         3. REPLICATED DATA TRANSFER (RF=2)
+                                (Parallel TCP)
 
+
+[UPLOAD FLOW]
+File -> [Client] -> (Request Live Nodes) -> [MetaServer]
+                    (Receive List: 9001, 9002) <-
+[Client] -> [Split Chunks] -> [ThreadPool]
+             |--> Send Chunk_1 (Replica 1) -> Node 9001
+             |--> Send Chunk_1 (Replica 2) -> Node 9002
+             |--> Send Chunk_2 (Replica 1) -> Node 9002
+             |--> Send Chunk_2 (Replica 2) -> Node 9001
+
+[DOWNLOAD FLOW]
+File -> [Client] -> (Query: "Where is file.pdf?") -> [MetaServer]
+                    (Receive Map: Chunk_1: [9001, 9002], Chunk_2: [9002, 9003]) <-
+
+[Client] -> [ThreadPool (8 Workers)]
+             |
+             |--> Worker 1: Request Chunk_1 from 9001 (Primary)
+             |    IF (9001 Dead) --> Request from 9002 (Secondary) --> [OK]
+             |
+             |--> Worker 2: Request Chunk_2 from 9002 (Primary) --> [OK]
+             |
+             |--> [Stall Detector]: Monitoring progress... (Timeout if no chunks arrive)
+
+[Client] -> [Received Map] -> (Sort & Merge Chunks) -> "downloaded_file.pdf"             
