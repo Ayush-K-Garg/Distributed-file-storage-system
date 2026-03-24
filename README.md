@@ -1,213 +1,207 @@
-# Distributed High-Performance File Storage System (C++)
+# 🚀 Distributed High-Performance File Storage System (C++)
 
-A robust, multi-threaded distributed storage solution built in C++ using TCP sockets (Winsock2). This system achieves high-speed data transfer through parallel chunking, thread-pooling, and real-time atomic monitoring of network throughput.
-
----
-
-## Table of Contents
-
-* [Overview](#overview)
-* [System Architecture](#system-architecture)
-    * [Client Orchestrator](#client-orchestrator)
-    * [Metadata Registry](#metadata-registry)
-    * [Storage Node Workers](#storage-node-workers)
-* [Key Technical Features](#key-technical-features)
-    * [Parallel Transfer Engine](#parallel-transfer-engine)
-    * [Dynamic Chunk Sizing](#dynamic-chunk-sizing)
-    * [Thread-Safe Synchronization](#thread-safe-synchronization)
-    * [Real-time Monitoring UI](#real-time-monitoring-ui)
-* [Storage Format and Protocol](#storage-format-and-protocol)
-* [How It Works](#how-it-works)
-    * [Upload Workflow](#upload-workflow)
-    * [Download Workflow](#download-workflow)
-* [Project Structure](#project-structure)
-* [Compilation and Execution](#compilation-and-execution)
-* [Performance Benchmarks](#performance-benchmarks)
-* [Future Roadmap and Scalability](#future-roadmap-and-scalability)
-* [Learning Outcomes](#learning-outcomes)
-* [Author](#author)
+A robust, self-healing, and multi-threaded distributed storage solution built in C++ using TCP sockets (**Winsock2**). This system achieves high-speed data transfer through parallel chunking, thread-pooling, and real-time monitoring. It is designed to be **fault-tolerant**, automatically handling node failures through a dynamic discovery and replication mechanism.
 
 ---
 
-## Overview
-
-This project is a decentralized storage environment designed to handle large-scale binary data. Files are partitioned into optimized segments, distributed across a cluster of storage nodes using a Round-Robin algorithm, and reconstructed with high integrity. The system is binary-safe, supporting PDFs, images, videos, and complex binary executables.
-
----
-
-## System Architecture
-
-### Client Orchestrator
-The client serves as the primary manager of the distributed lifecycle. It handles file partitioning, interaction with the Metadata Server for registry updates, and manages a ThreadPool of 8 concurrent workers to facilitate simultaneous I/O operations across different storage nodes.
-
-### Metadata Registry
-The Metadata Server (running on port 8001) maintains the global state of the system. It tracks which chunks of which files are stored on which storage node ports. It ensures fault tolerance by providing the client with multiple replica locations for each chunk.
-
-### Storage Node Workers
-Storage nodes are high-performance worker processes that listen on unique ports (e.g., 9001, 9002). Each node utilizes a Producer-Consumer model where a main thread accepts incoming TCP connections and dispatches them to a pool of worker threads that perform disk I/O.
+## 📑 Table of Contents
+* [System Architecture](#-system-architecture)
+* [Key Technical Features](#-key-technical-features)
+* [Advanced Fault Tolerance](#-advanced-fault-tolerance)
+* [Storage Protocol](#-storage-protocol)
+* [How It Works](#-how-it-works)
+* [Project Structure](#-project-structure)
+* [Compilation & Execution](#-compilation--execution)
+* [Performance Benchmarks](#-performance-benchmarks)
+* [Future Roadmap](#-future-roadmap)
+* [Learning Outcomes](#-learning-outcomes)
+* [Author](#-author)
 
 ---
 
-## Key Technical Features
+## 🏗️ System Architecture
 
-### Parallel Transfer Engine
-By utilizing a custom ThreadPool, the client bypasses the limitations of sequential TCP transfers. Up to 8 chunks can be uploaded or downloaded in parallel. This saturates available bandwidth, allowing local transfers to reach observed speeds of over 600 MB/s.
+The system consists of three primary components working in a decentralized cluster:
 
-### Dynamic Chunk Sizing
-The system intelligently analyzes file metadata to determine the most efficient chunk size:
-| File Size | Chunk Size | Why? |
+### 1. Client Orchestrator
+The "Brain" of the operation. It manages the file lifecycle: partitioning files into optimized chunks, querying the Metadata Server for live nodes, and managing a **ThreadPool of 8 concurrent workers** for simultaneous I/O.
+
+### 2. Metadata Registry (MetaServer)
+The central directory running on port **8001**. It tracks:
+* **Active Cluster State:** Real-time list of live storage nodes via heartbeats.
+* **File Map:** Which chunks of a file are stored on which specific nodes.
+* **Replication Registry:** Ensures every chunk has a primary and secondary location.
+
+### 3. Storage Node Workers
+Independent worker processes that can be launched on any unique port. They handle binary disk I/O and notify the MetaServer of their health status using a **Push-based Heartbeat** model.
+
+---
+
+## ⚡ Key Technical Features
+
+### 🚀 Parallel Transfer Engine
+Utilizes a custom **ThreadPool (8 Threads)** to bypass the limitations of sequential TCP. The system saturates available bandwidth by uploading/downloading multiple chunks simultaneously, reaching observed speeds of **670 MB/s** on local SSDs.
+
+### 📦 Dynamic Chunk Sizing
+Analyzes file metadata to determine the most efficient segment size, balancing network overhead vs. metadata count:
+| File Size | Chunk Size | Strategy |
 | :--- | :--- | :--- |
-| **< 1 MB** | 64 KB | Avoids socket handshake overhead for tiny files. |
-| **1 MB - 50 MB** | 256 KB | Balances metadata count and transfer speed. |
-| **50 MB - 500 MB** | 1 MB | Optimizes sequential I/O for medium-sized data. |
-| **500 MB - 2 GB** | 4 MB | Minimizes total chunk count for MetaServer health. |
-| **> 2 GB** | 8 MB | Prevents "Metadata Bloat" in massive files. |
-
-### Thread-Safe Synchronization
-* **std::atomic:** Used for global byte counters. This allows multiple worker threads to update the total transferred data count simultaneously without the performance penalty of a mutex.
-* **std::mutex & lock_guard:** Used to protect the shared map where chunks are collected during download. This ensures that the final file reconstruction is perfectly ordered despite chunks arriving out of sequence.
-* **Condition Variables:** Used in the ThreadPool to manage task distribution, ensuring worker threads remain idle when no tasks are available, reducing CPU consumption.
-
-### Real-time Monitoring UI
-The system features a non-blocking UI update mechanism. Using the carriage return (\r) escape sequence, the main thread prints a 40-character progress bar, a completion percentage, and a live speedometer (MB/s) that updates every 100ms without scrolling the console.
+| **< 1 MB** | 64 KB | Minimizes socket handshake overhead. |
+| **1 MB - 50 MB** | 256 KB | Optimized for standard documents/images. |
+| **50 MB - 500 MB** | 1 MB | Maximizes sequential I/O for medium data. |
+| **500 MB - 2 GB** | 4 MB | Balanced for large-scale distributed systems. |
+| **> 2 GB** | 8 MB | Prevents metadata bloat in the registry. |
 
 ---
 
-## Storage Format and Protocol
+## 🛡️ Advanced Fault Tolerance
 
-Chunks are persisted on disk using a structured naming convention:
-`data/node_id/filename.ext_chunk_id.bin`
+### 🔄 Replication Factor ($RF=2$)
+During upload, every chunk is automatically duplicated across **two different storage nodes**. Even if one node crashes, the file remains 100% available for reconstruction.
 
-The custom TCP protocol uses a fixed-header approach:
-1. Command Header (10 bytes)
-2. Metadata Length (int)
-3. Metadata Body (String)
-4. Payload Size (int)
-5. Binary Payload (Variable bytes)
+### ❤️ Heartbeat & Node Janitor
+* **Push Heartbeat:** Storage nodes send a "KEEP-ALIVE" signal to the MetaServer every **2 seconds**.
+* **Janitor Thread:** A background process on the MetaServer that prunes any node that hasn't responded in **6 seconds**, ensuring the client never attempts to connect to a "dead" node.
 
----
+### 🔍 Dynamic Node Discovery
+The system is **plug-and-play**. New storage nodes can join the cluster at any time without restarting the MetaServer or re-compiling the client. The client fetches a fresh "Live List" before every operation.
 
-## How It Works
-
-### Upload Workflow
-1. The client splits the local file into chunks based on the dynamic sizing logic.
-2. The client registers the filename and chunk count with the Metadata Server.
-3. The client initiates parallel UPLOAD commands to storage nodes.
-4. Chunks are distributed using a Round-Robin strategy to balance disk usage across nodes.
-
-### Download Workflow
-1. The client requests the chunk-map for a specific filename from the Metadata Server.
-2. The client receives a list of ports for every chunk.
-3. The ThreadPool initiates simultaneous GET_CHUNK requests. 
-4. If a primary node fails, the client uses the replica list to attempt a fallback download.
-5. Chunks are merged using the FileChunker service once all threads report success.
+### 🛑 Intelligent Stall Detection
+To prevent the client from hanging indefinitely during catastrophic node failures, the system monitors throughput. If chunk progress stops for **15 consecutive seconds**, the client gracefully terminates and reports a "Stall Error."
 
 ---
 
-## Project Structure
+## 📂 Storage Protocol
 
-```text
-.
-├── client/
-│   └── main.cpp                  (ThreadPool, UI, Atomics)
-├── metadata_server/
-│   └── MetadataServer.cpp        (Registry Logic)
-├── storage_node/
-│   └── StorageServer.cpp         (Worker Threads, Task Queue)
-├── common/
-│   ├── services/
-│   │   └── FileChunker.cpp       (Split/Merge Logic)
-│   └── models/
-│       └── Chunk.cpp             (Data Structure)
-├── data/                         (Node storage directories)
-├── samples/                      (Test files)
-└── README.md
+The custom TCP protocol utilizes a **Fixed-Header** approach for binary safety:
+1. **Command Header:** (10 bytes) - e.g., "UPLOAD", "GET_CHUNK"
+2. **Metadata Length:** (int) - Size of the incoming filename/id
+3. **Metadata Body:** (string) - Filename and Chunk ID
+4. **Payload Size:** (int) - Total size of binary data
+5. **Binary Payload:** (bytes) - The actual file content
 
-🛠️ Compilation and Execution
-Compilation
-The project requires the Winsock library (-lws2_32) for networking. Use the following commands:
+---
 
-Storage Node:
+## 🛠️ Compilation & Execution
 
-Bash
-g++ storage_node/StorageServer.cpp -o node -lws2_32
+### **Compilation**
+Requires the Winsock library (`-lws2_32`) on Windows.
 
-Metadata Server:
-
-Bash
+```bash
+# Compile Metadata Server
 g++ metadata_server/MetadataServer.cpp -o meta -lws2_32
 
-Client Application:
+# Compile Storage Node
+g++ storage_node/StorageServer.cpp -o node -lws2_32
 
-Bash
+# Compile Client
 g++ client/main.cpp common/services/FileChunker.cpp common/models/Chunk.cpp -o client_app -lws2_32
 
+# Execution (Local Cluster Setup)
 
-Execution (Local Cluster Setup)
-Start Metadata Server:
+## Start Metadata Server
 
-Bash
+```bash
 .\meta
-Start Storage Node Cluster (Separate Terminals):
+```
 
-Bash
-# Terminal 1
+## Launch Storage Nodes (Separate Terminals)
+
+```bash
 .\node 9001 data/node1
-
-# Terminal 2
 .\node 9002 data/node2
-Run Client Operations:
+.\node 9003 data/node3
+```
 
-Bash
-# Upload a file
+## Run Client Operations
+
+### Upload
+
+```bash
 .\client_app upload samples/file.pdf
+```
 
-# Sync (Upload + Download verification)
+### Download
+
+```bash
+.\client_app download samples/file.pdf
+```
+
+### Sync
+
+```bash
 .\client_app sync samples/file.pdf
+```
+
+---
+
+# Performance Benchmarks
+
+## Transfer Speeds
+
+Observed peaks of 670 MB/s during parallel chunk retrieval.
+
+## Concurrency
+
+Stable handling of 8+ simultaneous socket connections via ThreadPool.
+
+## Throughput Optimization
+
+400MB files processed in less than 1.0 seconds.
+
+## Scalability
+
+Linear performance increase as more physical nodes (ports) are added to the cluster.
+
+---
+
+# Future Roadmap
+
+## Fail-Proof MetaServer (High Availability)
+
+Implementing a leader-follower model or Distributed Consensus (Raft/Paxos) to eliminate the single point of failure.
+
+## Deployment & Containerization
+
+Creating Dockerfiles and Docker Compose configurations to deploy the cluster across cloud instances (AWS/Azure).
+
+## SHA-256 Integrity Check
+
+Hashing chunks during upload to prevent silent data corruption and verify content post-download.
+
+## Orchestration Daemon
+
+A master controller script to automate node scaling and one-click cluster management.
+
+## Metadata Persistence
+
+Moving in-memory registry to a persistent database to survive MetaServer reboots.
+
+---
+
+# Learning Outcomes
+
+## Advanced Networking
+
+Winsock2 socket programming, TCP/IP flow control, and custom binary protocol design.
+
+## High-Concurrency
+
+Systems design using ThreadPools, Task Queues, and the Producer-Consumer pattern.
+
+## Synchronization Primitives
+
+Practical application of std::atomic, std::mutex, and std::condition_variable.
+
+## Distributed Logic
+
+Architecture of Heartbeats, Replication (RF = 2), and Dynamic Discovery.
+
+---
+
+# Author
+
+Ayush Krishna Garg
+Focused on high-performance C++ backend systems, network programming, and distributed infrastructure.
 
 
- Performance Benchmarks
-Tested on a local Windows environment (SSD, Loopback Interface 127.0.0.1):
-
-Transfer Speeds: Observed peaks up to 670 MB/s during parallel chunk retrieval.
-
-Concurrency: Stable handling of 8+ simultaneous socket connections via ThreadPool.
-
-Throughput Optimization: 25MB files processed in < 2.0 seconds.
-
-Scalability: Linear performance increase observed as more physical nodes (ports) are added to the cluster.
-
- Future Roadmap and Scalability
-1. Automated Node Discovery (Variable Nodes)
-To eliminate hardcoded ports, we plan to implement a Discovery Service. Storage nodes will "check-in" with the Metadata Server upon startup. The Metadata Server will then provide the client with a dynamic, live list of available nodes, allowing the cluster to scale from 2 nodes to hundreds without recompiling code.
-
-2. Process Orchestration (One-Click Launch)
-To solve the manual terminal management issue, we are developing:
-
-Controller Daemon: A master script (Python or C++) that reads a configuration file and uses the Windows CreateProcess API to spawn and monitor all storage nodes in the background.
-
-Auto-Restart: A supervisor logic that automatically relaunches any node process that crashes.
-
-3. Deployment and Containerization
-Dockerization: Creating Dockerfiles for the Node and Meta Server to allow one-click deployment to cloud environments (AWS/Azure).
-
-Orchestration: Using Docker Compose or Kubernetes to start a whole cluster with a single command (e.g., docker-compose up --scale node=10).
-
-4. Advanced Fault Tolerance
-Heartbeat System: Implementing a UDP/TCP heartbeat where nodes ping the server every 2 seconds to report health.
-
-Replication Factor: Configuring the system to save every chunk on N nodes (N=2 or N=3) to ensure data safety if a disk fails.
-
-Integrity Hashing: Adding SHA-256 checksums to the metadata to verify file content after reconstruction.
-
- Learning Outcomes
-Advanced TCP/IP: Winsock2 socket programming and custom protocol design.
-
-High-Concurrency: Systems design using ThreadPools and Producer-Consumer patterns.
-
-Synchronization Primitives: Practical application of std::atomic, std::mutex, and std::condition_variable.
-
-Binary Handling: Design for binary-safe, large-scale distributed transfers.
-
- Author
-Developed as a high-performance C++ distributed systems exploration. Focus on network synchronization and parallel I/O.

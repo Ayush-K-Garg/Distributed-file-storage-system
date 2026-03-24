@@ -9,12 +9,34 @@
 #include <mutex>
 #include <condition_variable>
 #include <algorithm>
+#include <chrono>
 
 #pragma comment(lib, "ws2_32.lib")
 
 std::queue<SOCKET> taskQueue;
 std::mutex mtx;
 std::condition_variable cv;
+
+// Helper to send signals to the MetaServer
+void notifyMeta(int myPort, std::string cmd) {
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr = { AF_INET, htons(8001) };
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    
+    if (connect(sock, (sockaddr*)&addr, sizeof(addr)) == 0) {
+        std::string msg = cmd + " " + std::to_string(myPort);
+        send(sock, msg.c_str(), (int)msg.size() + 1, 0);
+    }
+    closesocket(sock);
+}
+
+// Background thread to send heartbeats every 2 seconds
+void heartbeatLoop(int myPort) {
+    while (true) {
+        notifyMeta(myPort, "HEARTBEAT");
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+}
 
 bool recvAll(SOCKET sock, char* buffer, int size) {
     int total = 0;
@@ -53,7 +75,6 @@ void worker(int port, std::string folder) {
         }
 
         std::string cmd(command);
-
         if (cmd == "UPLOAD") {
             int nameLen;
             recvAll(client_socket, (char*)&nameLen, sizeof(nameLen));
@@ -125,12 +146,16 @@ int main(int argc, char* argv[]) {
     _mkdir("data");
     _mkdir(folder.c_str());
 
+    // --- New Discovery Logic ---
+    notifyMeta(port, "JOIN");
+    std::thread(heartbeatLoop, port).detach();
+
     SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr = { AF_INET, htons(port), INADDR_ANY };
     bind(server_fd, (sockaddr*)&addr, sizeof(addr));
     listen(server_fd, 10);
 
-    std::cout << "Storage Node on port " << port << " running...\n";
+    std::cout << "Storage Node on port " << port << " running with heartbeat...\n";
 
     for (int i = 0; i < 8; i++) {
         std::thread(worker, port, folder).detach();
