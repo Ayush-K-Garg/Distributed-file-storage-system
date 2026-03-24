@@ -5,8 +5,16 @@
 #include <string>
 #include <direct.h>
 #include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <algorithm>
 
 #pragma comment(lib, "ws2_32.lib")
+
+std::queue<SOCKET> taskQueue;
+std::mutex mtx;
+std::condition_variable cv;
 
 bool recvAll(SOCKET sock, char* buffer, int size) {
     int total = 0;
@@ -18,135 +26,122 @@ bool recvAll(SOCKET sock, char* buffer, int size) {
     return true;
 }
 
-// CLIENT HANDLER THREAD
-void handleClient(SOCKET client_socket, int port, std::string folder) {
-
-    char command[10] = {0};
-
-    if (!recvAll(client_socket, command, 10)) {
-        closesocket(client_socket);
-        return;
+bool sendAll(SOCKET sock, const char* buffer, int size) {
+    int total = 0;
+    while (total < size) {
+        int sent = send(sock, buffer + total, size - total, 0);
+        if (sent <= 0) return false;
+        total += sent;
     }
-
-    std::string cmd(command);
-
-    std::cout << "[PORT " << port << "] Command: " << cmd << "\n";
-
-    // UPLOAD 
-
-    if (cmd == "UPLOAD") {
-
-        int nameLen;
-
-        if (!recvAll(client_socket, (char*)&nameLen, sizeof(nameLen))) {
-            closesocket(client_socket);
-            return;
-        }
-
-        std::vector<char> nameBuffer(nameLen);
-        if (!recvAll(client_socket, nameBuffer.data(), nameLen)) {
-            closesocket(client_socket);
-            return;
-        }
-
-        std::string fileName(nameBuffer.begin(), nameBuffer.end());
-
-        int id, size;
-
-        if (!recvAll(client_socket, (char*)&id, sizeof(id))) return;
-        if (!recvAll(client_socket, (char*)&size, sizeof(size))) return;
-
-        std::vector<char> buffer(size);
-
-        if (!recvAll(client_socket, buffer.data(), size)) return;
-
-        std::string filepath = folder + "/" + fileName + "_chunk_" + std::to_string(id) + ".bin";
-
-        std::ofstream out(filepath, std::ios::binary);
-        out.write(buffer.data(), buffer.size());
-        out.close();
-
-        std::cout << "[PORT " << port << "] Saved " << filepath << "\n";
-    }
-
-    // GET_CHUNK 
-
-    else if (cmd == "GET_CHUNK") {
-        int nameLen;
-
-        if (!recvAll(client_socket, (char*)&nameLen, sizeof(nameLen))) {
-            closesocket(client_socket);
-            return;
-        }
-
-        std::vector<char> nameBuffer(nameLen);
-        recvAll(client_socket, nameBuffer.data(), nameLen);
-
-        std::string fileName(nameBuffer.begin(), nameBuffer.end());
-
-        int chunkId;
-        recvAll(client_socket, (char*)&chunkId, sizeof(chunkId));
-
-        std::string filepath = folder + "/" + fileName + "_chunk_" + std::to_string(chunkId) + ".bin";
-
-        std::ifstream in(filepath, std::ios::binary);
-
-        if (!in) {
-            int notFound = -1;
-            send(client_socket, (char*)&notFound, sizeof(notFound), 0);
-        } else {
-            std::vector<char> buffer((std::istreambuf_iterator<char>(in)),
-                                     std::istreambuf_iterator<char>());
-
-            int size = buffer.size();
-
-            send(client_socket, (char*)&chunkId, sizeof(chunkId), 0);
-            send(client_socket, (char*)&size, sizeof(size), 0);
-            send(client_socket, buffer.data(), size, 0);
-
-            std::cout << "[PORT " << port << "] Sent " << filepath << "\n";
-        }
-    }
-
-    closesocket(client_socket);
+    return true;
 }
 
-// MAIN
-int main(int argc, char* argv[]) {
-    if (argc < 3) {
-        std::cout << "Usage: node <port> <folder>\n";
-        return 1;
-    }
+void worker(int port, std::string folder) {
+    while (true) {
+        SOCKET client_socket;
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            cv.wait(lock, [] { return !taskQueue.empty(); });
+            client_socket = taskQueue.front();
+            taskQueue.pop();
+        }
 
+        char command[10] = {0};
+        if (!recvAll(client_socket, command, 10)) {
+            closesocket(client_socket);
+            continue;
+        }
+
+        std::string cmd(command);
+
+        if (cmd == "UPLOAD") {
+            int nameLen;
+            recvAll(client_socket, (char*)&nameLen, sizeof(nameLen));
+            std::vector<char> nBuf(nameLen);
+            recvAll(client_socket, nBuf.data(), nameLen);
+            std::string fileName(nBuf.begin(), nBuf.end());
+
+            int id, size;
+            recvAll(client_socket, (char*)&id, sizeof(id));
+            recvAll(client_socket, (char*)&size, sizeof(size));
+
+            std::vector<char> buffer(size);
+            recvAll(client_socket, buffer.data(), size);
+
+            std::string filepath = folder + "/" + fileName + "_chunk_" + std::to_string(id) + ".bin";
+            std::ofstream out(filepath, std::ios::binary);
+            out.write(buffer.data(), size);
+            out.close();
+            std::cout << "[PORT " << port << "] Received Chunk " << id << "\n";
+        } 
+        else if (cmd == "GET_CHUNK") {
+            int nameLen;
+            recvAll(client_socket, (char*)&nameLen, sizeof(nameLen));
+            std::vector<char> nBuf(nameLen);
+            recvAll(client_socket, nBuf.data(), nameLen);
+            std::string fileName(nBuf.begin(), nBuf.end());
+
+            int chunkId;
+            recvAll(client_socket, (char*)&chunkId, sizeof(chunkId));
+
+            std::string filepath = folder + "/" + fileName + "_chunk_" + std::to_string(chunkId) + ".bin";
+            std::ifstream in(filepath, std::ios::binary | std::ios::ate);
+
+            if (!in) {
+                int fail = -1;
+                sendAll(client_socket, (char*)&fail, sizeof(fail));
+            } else {
+                int size = (int)in.tellg();
+                in.seekg(0, std::ios::beg);
+
+                sendAll(client_socket, (char*)&chunkId, sizeof(chunkId));
+                sendAll(client_socket, (char*)&size, sizeof(size));
+
+                char buffer[64 * 1024];
+                int totalSent = 0;
+                while (totalSent < size) {
+                    int toRead = std::min((int)sizeof(buffer), size - totalSent);
+                    in.read(buffer, toRead);
+                    int actualRead = (int)in.gcount();
+                    sendAll(client_socket, buffer, actualRead);
+                    totalSent += actualRead;
+                }
+                in.close();
+                std::cout << "[PORT " << port << "] Sent Chunk " << chunkId << "\n";
+            }
+        }
+        closesocket(client_socket);
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 3) return 1;
     int port = atoi(argv[1]);
     std::string folder = argv[2];
 
     WSADATA wsa;
     WSAStartup(MAKEWORD(2,2), &wsa);
 
-    SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
-
-    sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(port);
-
-    bind(server_fd, (sockaddr*)&server_addr, sizeof(server_addr));
-
-    listen(server_fd, 10);
-
     _mkdir("data");
     _mkdir(folder.c_str());
 
-    std::cout << "Storage Node running on port " << port << "\n";
+    SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr = { AF_INET, htons(port), INADDR_ANY };
+    bind(server_fd, (sockaddr*)&addr, sizeof(addr));
+    listen(server_fd, 10);
 
-    while (true) {
-        SOCKET client_socket = accept(server_fd, NULL, NULL);
+    std::cout << "Storage Node on port " << port << " running...\n";
 
-        std::thread t(handleClient, client_socket, port, folder);
-        t.detach();
+    for (int i = 0; i < 8; i++) {
+        std::thread(worker, port, folder).detach();
     }
 
-    closesocket(server_fd);
-    WSACleanup();
+    while (true) {
+        SOCKET client = accept(server_fd, NULL, NULL);
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            taskQueue.push(client);
+        }
+        cv.notify_one();
+    }
 }
