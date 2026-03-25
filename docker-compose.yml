@@ -1,0 +1,39 @@
+
+
+services:
+  meta-server:
+    build:
+      context: .
+      dockerfile: metadata_server/Dockerfile
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data/meta:/usr/src/app/data 
+
+  node1:
+    build:
+      context: .
+      dockerfile: storage_node/Dockerfile
+    environment:
+      - META_HOST=meta-server
+    ports:
+      - "9001:9001" 
+    command: ["./node_app", "9001", "data/node1"]
+    depends_on:
+      - meta-server
+    volumes:
+      - ./data/node1:/usr/src/app/data/node1
+
+  node2:
+    build:
+      context: .
+      dockerfile: storage_node/Dockerfile
+    environment:
+      - META_HOST=meta-server
+    ports:
+      - "9002:9002" 
+    command: ["./node_app", "9002", "data/node2"]
+    depends_on:
+      - meta-server
+    volumes:
+      - ./data/node2:/usr/src/app/data/node2

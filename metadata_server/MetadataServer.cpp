@@ -8,25 +8,30 @@
 #include <chrono>
 #include <ctime>
 #include <sstream>
+#include <algorithm> // Required for string cleaning
 #include "../common/utils/SocketWrapper.h" 
 
-// Central Registry: filename -> { fileHash, list of [chunkId, list of ports] }
 struct FileEntry {
     std::string hash;
     std::vector<std::pair<int, std::vector<int>>> chunks;
 };
-std::unordered_map<std::string, FileEntry> metadata;
 
-// Discovery Registry: port -> last_seen_timestamp
+std::unordered_map<std::string, FileEntry> metadata;
 std::unordered_map<int, std::time_t> liveNodes;
 std::mutex globalMtx; 
 
-// =========================
-// PERSISTENCE LOGIC
-// =========================
+// --- UTILS ---
 
+void cleanString(std::string& s) {
+    s.erase(std::remove(s.begin(), s.end(), '\0'), s.end());
+    s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
+    s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
+}
+
+// Updated path to use the Docker Volume for persistence
 void saveToRegistry(std::string filename, std::string hash, int numChunks, const std::vector<std::pair<int, std::vector<int>>>& chunks) {
-    std::ofstream db("registry.db", std::ios::app);
+    MKDIR("data"); // Ensure folder exists
+    std::ofstream db("data/registry.db", std::ios::app); 
     db << "FILE " << filename << " " << hash << " " << numChunks << "\n";
     for (auto const& p : chunks) {
         db << "CHUNK " << p.first << " " << p.second.size();
@@ -37,7 +42,7 @@ void saveToRegistry(std::string filename, std::string hash, int numChunks, const
 }
 
 void loadRegistry() {
-    std::ifstream db("registry.db");
+    std::ifstream db("data/registry.db");
     if (!db) return;
     std::string line;
     while (std::getline(db, line)) {
@@ -61,7 +66,7 @@ void loadRegistry() {
             metadata[fname] = entry;
         }
     }
-    std::cout << "--- Metadata Registry loaded from disk (" << metadata.size() << " files) ---\n";
+    std::cout << "--- Metadata Registry loaded (" << metadata.size() << " files) ---" << std::endl;
 }
 
 bool sendAll(SOCKET sock, const char* buffer, int size) {
@@ -81,7 +86,7 @@ void nodeJanitor() {
         std::time_t now = std::time(nullptr);
         for (auto it = liveNodes.begin(); it != liveNodes.end(); ) {
             if (std::difftime(now, it->second) > 6.0) {
-                std::cout << "--- Node " << it->first << " disconnected (Timeout) ---\n";
+                std::cout << "--- Node " << it->first << " disconnected ---" << std::endl;
                 it = liveNodes.erase(it);
             } else ++it;
         }
@@ -89,7 +94,6 @@ void nodeJanitor() {
 }
 
 int main() {
-    // Cross-platform socket initialization
     if (!InitializeSockets()) return 1;
 
     SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -97,11 +101,9 @@ int main() {
     bind(server_fd, (sockaddr*)&addr, sizeof(addr));
     listen(server_fd, 10);
 
-    // 1. Load existing files from registry.db
     loadRegistry();
-
     std::thread(nodeJanitor).detach();
-    std::cout << "Metadata Server running on port 8001 (Heartbeat enabled)\n";
+    std::cout << "Metadata Server running on port 8001" << std::endl;
 
     while (true) {
         SOCKET client = accept(server_fd, NULL, NULL);
@@ -117,7 +119,7 @@ int main() {
             int port; ss >> port;
             std::lock_guard<std::mutex> lock(globalMtx);
             liveNodes[port] = std::time(nullptr);
-            if (command == "JOIN") std::cout << "+++ Node " << port << " joined +++\n";
+            if (command == "JOIN") std::cout << "+++ Node " << port << " joined +++" << std::endl;
         }
         else if (command == "GET_LIVE_NODES") {
             std::lock_guard<std::mutex> lock(globalMtx);
@@ -128,14 +130,13 @@ int main() {
         else if (command == "REGISTER") {
             std::string filename, fileHash; int numChunks;
             ss >> filename >> numChunks >> fileHash; 
+            cleanString(filename); // CLEAN FILENAME
 
             std::lock_guard<std::mutex> lock(globalMtx);
             std::vector<int> currentPorts;
             for(auto const& [port, _] : liveNodes) currentPorts.push_back(port);
 
-            if (currentPorts.empty()) {
-                std::cout << "Error: Registration failed. No live nodes.\n";
-            } else {
+            if (!currentPorts.empty()) {
                 std::vector<std::pair<int, std::vector<int>>> chunks;
                 for (int i = 0; i < numChunks; i++) {
                     std::vector<int> replicas;
@@ -144,25 +145,27 @@ int main() {
                     chunks.push_back({i, replicas});
                 }
                 metadata[filename] = {fileHash, chunks};
-                
-                // Persistence: Append new entry to registry file
                 saveToRegistry(filename, fileHash, numChunks, chunks);
-                std::cout << "Registered: " << filename << " with RF=2 and Hash [" << fileHash << "]\n";
+                std::cout << "Registered: " << filename << " (RF=2)" << std::endl;
             }
+            
+            // HANDSHAKE: Send OK to client so it knows we are finished
+            std::string ok = "OK";
+            send(client, ok.c_str(), (int)ok.size() + 1, 0);
         }
         else if (command == "GET") {
             std::string filename; ss >> filename;
+            cleanString(filename); // CLEAN FILENAME
             std::lock_guard<std::mutex> lock(globalMtx);
+            
             if (metadata.find(filename) == metadata.end()) {
                 int end = -1; sendAll(client, (char*)&end, sizeof(end));
             } else {
-                // 1. Send the Hash first so the client can verify it later
                 std::string h = metadata[filename].hash;
                 int hLen = (int)h.size();
                 sendAll(client, (char*)&hLen, sizeof(hLen));
                 sendAll(client, h.c_str(), hLen);
 
-                // 2. Send Chunk Map
                 for (auto &p : metadata[filename].chunks) {
                     int id = p.first;
                     std::vector<int> filteredPorts;
@@ -179,7 +182,6 @@ int main() {
         }
         CLOSE_SOCKET(client);
     }
-    
     CleanupSockets();
     return 0;
 }

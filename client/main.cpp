@@ -41,10 +41,10 @@ bool sendAll(SOCKET sock, const char *buffer, int size) {
     return true;
 }
 
-SOCKET connectToServer(int port) {
+SOCKET connectToServer(const std::string& host, int port) {
     SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr = { AF_INET, htons(port) };
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    addr.sin_addr.s_addr = inet_addr(host.c_str());
 
 #ifdef _WIN32
     int timeout = 5000;
@@ -131,16 +131,19 @@ int main(int argc, char* argv[]) {
     if (!InitializeSockets()) return 1;
 
     if (argc < 3) {
-        std::cout << "Usage: client_app upload|download|sync <filepath>\n";
+        std::cout << "Usage: client_app upload|download|sync <filepath>"<<std::endl;
         return 1;
     }
+
+    const char* envHost = std::getenv("META_HOST");
+    std::string metaHost = (envHost == nullptr) ? "127.0.0.1" : envHost;
 
     std::string mode = argv[1];
     std::string filepath = argv[2];
     std::string filename = extractFileName(filepath);
 
     std::vector<int> storagePorts;
-    SOCKET liveSock = connectToServer(8001);
+    SOCKET liveSock = connectToServer(metaHost, 8001);
     if (liveSock != INVALID_SOCKET) {
         std::string req = "GET_LIVE_NODES";
         sendAll(liveSock, req.c_str(), (int)req.size() + 1);
@@ -155,10 +158,10 @@ int main(int argc, char* argv[]) {
 
     // UPLOAD / SYNC
     if (mode == "upload" || mode == "sync") {
-        if (storagePorts.empty()) { std::cout << "Error: No storage nodes online.\n"; return 1; }
+        if (storagePorts.empty()) { std::cout << "Error: No storage nodes online."<<std::endl; return 1; }
         
         std::string fileHash = SHA256::hashFile(filepath);
-        if(fileHash == "") { std::cout << "Error: Source file missing or unreadable.\n"; return 1; }
+        if(fileHash == "") { std::cout << "Error: Source file missing or unreadable."<<std::endl; return 1; }
 
         std::ifstream fileInfo(filepath, std::ios::binary | std::ios::ate);
         long long fileSize = (long long)fileInfo.tellg(); fileInfo.close();
@@ -170,7 +173,7 @@ int main(int argc, char* argv[]) {
         long long totalUploadSize = 0;
         for (const auto &c : chunks) totalUploadSize += (c.data.size() * ((storagePorts.size() > 1) ? 2 : 1));
 
-        SOCKET metaSock = connectToServer(8001);
+        SOCKET metaSock = connectToServer(metaHost, 8001);
         if (metaSock != INVALID_SOCKET) {
             std::string req = "REGISTER " + filename + " " + std::to_string(chunks.size()) + " " + fileHash;
             sendAll(metaSock, req.c_str(), (int)req.size() + 1);
@@ -189,7 +192,7 @@ int main(int argc, char* argv[]) {
                 uploadPool.enqueue([&uploadedBytes, &chunks, i, port, filename]() {
                     int retries = 2; bool success = false;
                     while (retries-- >= 0 && !success) {
-                        SOCKET storSock = connectToServer(port);
+                        SOCKET storSock = connectToServer("127.0.0.1", port);
                         if (storSock == INVALID_SOCKET) continue;
                         if (sendAll(storSock, "UPLOAD", 10)) {
                             int nLen = (int)filename.size();
@@ -215,12 +218,12 @@ int main(int argc, char* argv[]) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
         uploadPool.shutdown();
-        std::cout << "\nUpload complete.\n";
+        std::cout << "\nUpload complete."<<std::endl;
     }
 
     // DOWNLOAD / SYNC
     if (mode == "download" || mode == "sync") {
-        SOCKET metaSock = connectToServer(8001);
+        SOCKET metaSock = connectToServer(metaHost, 8001);
         if (metaSock == INVALID_SOCKET) return 1;
         std::string getReq = "GET " + filename;
         sendAll(metaSock, getReq.c_str(), (int)getReq.size() + 1);
@@ -241,12 +244,12 @@ int main(int argc, char* argv[]) {
         }
         CLOSE_SOCKET(metaSock);
 
-        if (chunkMap.empty()) { std::cout << "Error: File metadata not found.\n"; return 1; }
+        if (chunkMap.empty()) { std::cout << "Error: File metadata not found."<<std::endl; return 1; }
 
         // Pre-flight check: ensure at least one node is online
         bool nodesReady = false;
         for(auto &p : chunkMap) if(!p.second.empty()) nodesReady = true;
-        if(!nodesReady) { std::cout << "Error: All storage replicas are currently OFFLINE.\n"; return 1; }
+        if(!nodesReady) { std::cout << "Error: All storage replicas are currently OFFLINE."<<std::endl; return 1; }
 
         ThreadPool downloadPool(8);
         std::map<int, Chunk> received; std::mutex mtxMap;
@@ -257,7 +260,8 @@ int main(int argc, char* argv[]) {
             int tid = p.first; auto tports = p.second;
             downloadPool.enqueue([&received, &mtxMap, &downloadedBytes, tid, tports, filename]() {
                 for (int port : tports) {
-                    SOCKET sock = connectToServer(port); if (sock == INVALID_SOCKET) continue;
+                    SOCKET sock = connectToServer("127.0.0.1", port); 
+                    if (sock == INVALID_SOCKET) continue;
                     sendAll(sock, "GET_CHUNK", 10);
                     int nLen = (int)filename.size(); sendAll(sock, (char*)&nLen, sizeof(nLen));
                     sendAll(sock, filename.c_str(), nLen); sendAll(sock, (char*)&tid, sizeof(tid));
@@ -293,14 +297,14 @@ int main(int argc, char* argv[]) {
         downloadPool.shutdown(); 
 
         if (isStalled) {
-            std::cout << "\n\nError: Download stalled. Some chunks were unreachable.\n";
+            std::cout << "\n\nError: Download stalled. Some chunks were unreachable."<<std::endl;
         } else {
             std::vector<Chunk> finalChunks;
             for (auto &p : received) finalChunks.push_back(p.second);
             std::string out = "downloaded_" + filename;
             FileChunker(1024).merge(out, finalChunks);
-            if (SHA256::hashFile(out) == expectedHash) std::cout << "\nVerified [MATCH].\n";
-            else std::cout << "\nVerification [FAILED] - Content mismatch.\n";
+            if (SHA256::hashFile(out) == expectedHash) std::cout << "\nVerified [MATCH]."<<std::endl;
+            else std::cout << "\nVerification [FAILED] - Content mismatch."<<std::endl;
         }
     }
 

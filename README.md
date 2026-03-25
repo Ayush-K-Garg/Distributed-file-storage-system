@@ -1,169 +1,58 @@
-# Distributed High-Performance File Storage System (C++)
+#  Distributed High-Performance File Storage System (C++)
 
-A robust, **self-healing**, and **multi-threaded** distributed storage solution built in **C++** using TCP sockets (**Winsock2**). This system achieves high-speed data transfer through **parallel chunking**, **thread-pooling**, and real-time **integrity verification**. It is designed to be **fault-tolerant**, automatically handling node failures through a dynamic discovery mechanism, **replication (RF=2)**, and **persistent metadata journaling**.
+> A robust, self-healing, multi-threaded distributed storage system built in **C++** using **TCP sockets**.
 
----
-
-## Table of Contents
-* [System Architecture](#system-architecture)
-* [Key Technical Features](#key-technical-features)
-* [Advanced Fault Tolerance](#advanced-fault-tolerance)
-* [Storage Protocol](#storage-protocol)
-* [Compilation and Execution](#compilation-and-execution)
-* [Performance Benchmarks](#performance-benchmarks)
-* [Future Roadmap](#future-roadmap)
-* [Learning Outcomes](#learning-outcomes)
-* [Author](#author)
-* [System Visual Flow](#system-visual-flow)
+This system achieves high-speed data transfer through **parallel chunking**, **thread pooling**, **replication (RF = 2)**, and **end-to-end integrity verification (SHA-256)**. It is fully containerized using **Docker** and designed for fault tolerance, scalability, and performance.
 
 ---
 
-## System Architecture
+##  Table of Contents
 
-The system consists of three primary components working in a decentralized cluster:
-
-### 1. Client Orchestrator
-The **"Brain"** of the operation. It manages the file lifecycle: partitioning files into **optimized chunks**, calculating **SHA-256 fingerprints**, and managing a **ThreadPool of 8 concurrent workers** for simultaneous binary I/O.
-
-### 2. Metadata Registry (MetaServer)
-The central directory running on port **8001**. It tracks:
-* **Active Cluster State:** Real-time list of live storage nodes via **heartbeats**.
-* **Persistent File Map:** A disk-backed registry (**registry.db**) that stores which chunks belong to which nodes.
-* **Integrity Anchor:** Stores the original **SHA-256 hash** of every file to ensure bit-perfect reconstruction.
-
-### 3. Storage Node Workers
-Independent worker processes that handle **binary disk I/O**. They notify the MetaServer of their health status using a **Push-based Heartbeat** model and store chunks as raw binary segments.
-
----
-
-## Key Technical Features
-
-### Parallel Transfer Engine
-Utilizes a custom **ThreadPool (8 Threads)** to bypass the limitations of sequential TCP. The system saturates available bandwidth by uploading/downloading multiple chunks simultaneously, reaching observed local speeds exceeding **1.1 GB/s** on high-performance SSDs.
-
-### End-to-End Data Integrity (SHA-256)
-The system implements a **Shield of Truth** verification model:
-* **Pre-Upload:** Client generates a unique **fingerprint (Hash)** of the file.
-* **Storage:** MetaServer stores this hash as the global **Source of Truth**.
-* **Post-Download:** Client re-hashes the reconstructed file and compares it. If a single bit was flipped during transfer, the system flags a **Content Mismatch**.
-
-### Metadata Persistence (Journaling)
-To eliminate the Metadata Server as a volatile **Single Point of Failure (SPOF)**, we implemented **Write-Ahead Logging (WAL)**:
-* Every registration is appended to **registry.db**.
-* Upon a crash or reboot, the MetaServer automatically restores its entire memory state from the **disk journal**.
-
-### Dynamic Chunk Sizing
-Analyzes file metadata to determine the most efficient segment size, balancing **network overhead** vs. **metadata count**:
-
-| File Size | Chunk Size | Strategy |
-| :--- | :--- | :--- |
-| **< 1 MB** | 64 KB | Minimizes socket handshake overhead. |
-| **50 MB - 500 MB** | 1 MB | Maximizes **sequential I/O** for medium data. |
-| **> 2 GB** | 8 MB | Prevents metadata bloat in the registry. |
+- [System Architecture](#system-architecture)
+- [System Visual Flow](#system-visual-flow)
+- [Detailed Logic Flows](#detailed-logic-flows)
+- [Key Technical Features](#key-technical-features)
+- [Scaling the Cluster](#scaling-the-cluster)
+- [Fault Tolerance & Chaos Testing](#fault-tolerance--chaos-testing)
+- [Docker Orchestration](#docker-orchestration)
+- [Compilation and Execution](#compilation-and-execution)
+- [Performance Benchmarks](#performance-benchmarks)
+- [Future Roadmap](#future-roadmap)
+- [Learning Outcomes](#learning-outcomes)
+- [Author](#author)
 
 ---
 
-## Advanced Fault Tolerance
+##  System Architecture
 
-### Replication Factor (RF=2)
-During upload, every chunk is automatically duplicated across **two different storage nodes**. Even if a node crashes, the file remains **100% available** for reconstruction from the secondary replica.
+The system follows a **decentralized cluster architecture** with three main components:
 
-### Heartbeat and Node Janitor
-* **Push Heartbeat:** Storage nodes send a signal to the MetaServer every **2 seconds**.
-* **Janitor Thread:** A background process on the MetaServer that prunes any node that hasn't responded in **6 seconds**, ensuring the client never attempts to connect to a **dead node**.
+### 1.  Client Orchestrator
+- Central interface for all file operations
+- Splits files into optimized chunks (**1MB / 4MB**)
+- Generates **SHA-256** hash for integrity
+- Uses **ThreadPool (8 threads)** for parallel I/O
 
-### Intelligent Stall Detection
-To prevent the client from hanging indefinitely during catastrophic node failures, the system monitors chunk progress. If progress stops for **12-15 consecutive seconds**, the client gracefully terminates, cleans up resources, and reports a **Stall Error** instead of merging a corrupted file.
+### 2.  Metadata Registry (MetaServer)
+- Runs on **Port `8001`**
+- Maintains:
+  - Node heartbeats
+  - Chunk-to-node mapping
+- Stores persistent state in: `data/registry.db`
+
+### 3.  Storage Node Workers
+- Independent processes
+- Handle binary disk I/O
+- Use **heartbeat mechanism** to report health
+- Store chunks as raw binary files
 
 ---
 
-## Storage Protocol
+##  System Visual Flow
 
-The custom TCP protocol utilizes a **Fixed-Header** approach for binary safety:
-1. **Command Header:** (10 bytes) - e.g., "UPLOAD", "GET_CHUNK"
-2. **Hash Metadata:** (string) - **SHA-256 Fingerprint** for integrity.
-3. **Payload Size:** (int) - Total size of binary data.
-4. **Binary Payload:** (bytes) - The actual raw file content.
-
----
-
-## Compilation and Execution
-
-### Compilation
-Requires the **Winsock** library (`-lws2_32`) and **C++17** or higher.
-
-```bash
-# Compile Metadata Server
-g++ metadata_server/MetadataServer.cpp -o meta -lws2_32
-
-# Compile Storage Node
-g++ storage_node/StorageServer.cpp -o node -lws2_32
-
-# Compile Client (Include SHA256 and Chunker)
-g++ client/main.cpp common/services/FileChunker.cpp -o client_app -lws2_32
-
-g++ client/main.cpp common/services/FileChunker.cpp common/models/Chunk.cpp -o client_app -lws2_32
-
-
-Execution
-Start Metadata Server:
-
-Bash
-.\meta
-Launch Storage Nodes (Multiple Terminals):
-
-Bash
-.\node 9001 data/node1
-.\node 9002 data/node2
-.\node 9003 data/node3
-Run Client Operations:
-
-Bash
-# Upload and Verify
-.\client_app upload samples/video.mp4
-
-# Download and Failover Check
-.\client_app download samples/video.mp4
-
-# Sync (Automatic Upload then Download)
-.\client_app sync samples/video.mp4
-
-
-Performance Benchmarks
-Transfer Speeds: Observed peaks of 1,100+ MB/s during parallel chunk retrieval.
-
-Scalability: Linear performance increase as more physical nodes (ports) are added to the cluster.
-
-Throughput Optimization: 1.3 GB files processed, transferred, and verified in ~1.2 seconds.
-
-Concurrency: Stable handling of 8+ simultaneous socket connections via ThreadPool.
-
-Future Roadmap
-Containerization: Wrapping the architecture in Docker and Docker Compose for cloud-scale deployment.
-
-Orchestration Daemon: A master controller script to automate node scaling and one-click cluster management.
-
-Advanced Consensus: Implementing the Raft Algorithm for MetaServer high availability to fully eliminate SPOF.
-
-Learning Outcomes
-Advanced Networking: Winsock2 socket programming, TCP/IP flow control, and custom binary protocol design.
-
-High-Concurrency: Systems design using ThreadPools, Task Queues, and the Producer-Consumer pattern.
-
-Data Integrity: Implementation of cryptographic hashing for end-to-end consistency.
-
-Distributed Logic: Architecture of Heartbeats, Replication (RF=2), and Dynamic Discovery.
-
-## Author
-Ayush Krishna Garg
-National Institute of Technology (NIT), Jamshedpur
-B.Tech, Electronics and Communication Engineering
-Focused on high-performance C++ backend systems, network programming, and distributed infrastructure.
-
-System Visual Flow
-
+```
 ┌─────────────────────────────────────────────────────────┐
-│                   CLIENT ORCHESTRATOR                   │
+│                 CLIENT ORCHESTRATOR                     │
 │  (File Splitter | ThreadPool | Parallel I/O | UI)       │
 └──────────────┬───────────────────────────────▲──────────┘
                │                               │
@@ -171,10 +60,10 @@ System Visual Flow
                │                               │
 ┌──────────────▼───────────────────────────────┴──────────┐
 │                METADATA SERVER (Port 8001)              │
-│    (Node Registry | Heartbeat Janitor | registry.db)    │
+│     (Node Registry | Heartbeat | registry.db)           │
 └──────────────▲───────────────────────────────▲──────────┘
                │                               │
-       4. JOIN/HEARTBEAT                4. JOIN/HEARTBEAT
+        4. JOIN/HEARTBEAT                4. JOIN/HEARTBEAT
                │                               │
 ┌──────────────┴──────────┐       ┌──────────────┴──────────┐
 │   STORAGE NODE (9001)   │       │   STORAGE NODE (9002)   │
@@ -183,30 +72,211 @@ System Visual Flow
                │                               │
                └───────────────┬───────────────┘
                                │
-                  3. REPLICATED DATA TRANSFER (RF=2)
-                          (Parallel TCP)
+               3. REPLICATED DATA TRANSFER (RF=2)
+                         (Parallel TCP)
+```
 
+---
 
-[UPLOAD FLOW]
-File -> [Client] -> (Request Live Nodes) -> [MetaServer]
+## 🔍 Detailed Logic Flows
 
-[Client] -> Calculates SHA-256 Hash.
+###  Upload Flow (`PUT`)
 
-[Client] -> Splits file into chunks -> Enqueues to ThreadPool.
+| Step | Action | Detail |
+|------|--------|--------|
+| 1 | **File Chunking** | Split file into segments (1MB / 4MB) |
+| 2 | **Hash Generation** | Compute SHA-256 of entire file |
+| 3 | **Metadata Registration** | `REGISTER <filename> <chunkCount> <hash>` |
+| 4 | **Node Allocation** | Round-robin selection, assign **2 nodes per chunk** (RF = 2) |
+| 5 | **Parallel Transfer** | ThreadPool executes concurrent uploads |
+| 6 | **Acknowledgment** | MetaServer responds `"OK"` after persistence |
 
-Worker Threads -> Parallel Send (Replica 1 -> Node 9001, Replica 2 -> Node 9002).
+###  Download Flow (`GET`)
 
+| Step | Action | Detail |
+|------|--------|--------|
+| 1 | **Request** | `GET <filename>` |
+| 2 | **Metadata Lookup** | Retrieve chunk map + hash |
+| 3 | **Node Filtering** | Remove inactive nodes (heartbeat timeout) |
+| 4 | **Parallel Retrieval** | Fetch chunks concurrently |
+| 5 | **Fallback** | Switch to replica if primary node is down |
+| 6 | **Reconstruction** | Merge chunks sequentially |
+| 7 | **Integrity Verification** | Compare SHA-256 hashes |
 
+---
 
-[DOWNLOAD FLOW]
+##  Key Technical Features
 
+###  Parallel Transfer Engine
+- Custom **ThreadPool (8 threads)**
+- Multi-stream **TCP transfers**
+- Achieves **~1.1 GB/s** (local environment)
 
-[Client] -> (Query: "Where is file.pdf?") -> [MetaServer].
+###  End-to-End Data Integrity
+- **SHA-256** verification at:
+  - Upload
+  - Storage
+  - Download
 
-[MetaServer] -> Returns Chunk Map + Expected SHA-256 Hash.
+###  Metadata Journaling
+- Persistent storage in `data/registry.db`
+- Enables **full recovery** after restart
 
-[Client] -> ThreadPool requests chunks from Primary Nodes.
+---
 
-Failover: IF (Primary Node Dead) -> Request from Secondary Replica -> [OK].
+##  Scaling the Cluster
 
-[Client] -> Merge Chunks -> Re-verify SHA-256 -> "Verified [MATCH]".
+To add a new node, append it to your `docker-compose.yml`:
+
+```yaml
+node3:
+  build:
+    context: .
+    dockerfile: storage_node/Dockerfile
+  environment:
+    - META_HOST=meta-server
+  ports:
+    - "9003:9003"
+  command: ["./node_app", "9003", "data/node3"]
+  volumes:
+    - ./data/node3:/usr/src/app/data/node3
+```
+
+Then apply the changes:
+
+```bash
+docker-compose up -d --build
+```
+
+---
+
+##  Fault Tolerance & Chaos Testing
+
+###  Node Failure Test
+```bash
+docker-compose stop node1
+```
+>  System automatically retrieves data from the **replica node**.
+
+###  Metadata Server Failure
+```bash
+docker-compose stop meta-server
+```
+>  Client operations fail — **Single Point of Failure confirmed** (known limitation).
+
+###  Persistence Test
+```bash
+docker-compose down
+docker-compose up
+```
+>  Data fully restored from `registry.db`.
+
+---
+
+##  Docker Orchestration
+
+| Action | Command |
+|--------|---------|
+| **Start Cluster** | `docker-compose up --build` |
+| **Stop Cluster** | `docker-compose down` |
+| **View Logs** | `docker-compose logs -f meta-server` |
+
+---
+
+##  Compilation and Execution
+
+### Compilation
+
+**Metadata Server**
+```bash
+g++ metadata_server/MetadataServer.cpp -o meta -lws2_32
+```
+
+**Storage Node**
+```bash
+g++ storage_node/StorageServer.cpp -o node_app -lws2_32
+```
+
+**Client**
+```bash
+g++ client/main.cpp \
+  common/services/FileChunker.cpp \
+  common/models/Chunk.cpp \
+  -o client_app -lws2_32
+```
+
+### Execution
+
+**Using Docker (Recommended)**
+```bash
+docker-compose up --build
+```
+
+**Client Commands**
+
+```bash
+# Upload a file
+./client_app upload samples/video.mp4
+
+# Download a file
+./client_app download video.mp4
+
+# Sync (Verification)
+./client_app sync samples/video.mp4
+```
+
+---
+
+##  Performance Benchmarks
+
+| Metric | Value |
+|--------|-------|
+| **Transfer Speed** | ~1.1 GB/s |
+| **Thread Pool Size** | 8 threads |
+| **Replication Factor** | 2 |
+| **Chunk Size** | 1MB / 4MB |
+
+---
+
+##  Future Roadmap
+
+- [ ] Smart load balancing (CPU + disk aware)
+- [ ] Client-side **AES-256** encryption
+- [ ] Flutter dashboard for live monitoring
+- [ ] Distributed geo-replication
+- [ ] Adaptive chunk sizing
+
+---
+
+##  Learning Outcomes
+
+- Distributed systems design
+- Fault tolerance and replication
+- Socket programming (**Winsock2**)
+- Multithreading and concurrency
+- Docker and containerization
+- Data integrity and hashing
+
+---
+
+##  Author
+
+**Ayush Krishna Garg**
+*National Institute of Technology (NIT), Jamshedpur*
+*B.Tech — Electronics and Communication Engineering*
+
+**Focus Areas:**
+- High-performance C++ systems
+- Distributed architecture
+- Network programming
+
+---
+
+##  Final Notes
+
+This project demonstrates a **production-grade distributed storage system** with:
+
+-  High performance
+-  Strong consistency
+-  Fault tolerance
+-  Scalability
