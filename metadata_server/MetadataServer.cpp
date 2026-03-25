@@ -1,6 +1,5 @@
 #include <iostream>
 #include <fstream>
-#include <winsock2.h>
 #include <unordered_map>
 #include <vector>
 #include <string>
@@ -9,8 +8,7 @@
 #include <chrono>
 #include <ctime>
 #include <sstream>
-
-#pragma comment(lib, "ws2_32.lib")
+#include "../common/utils/SocketWrapper.h" 
 
 // Central Registry: filename -> { fileHash, list of [chunkId, list of ports] }
 struct FileEntry {
@@ -91,7 +89,9 @@ void nodeJanitor() {
 }
 
 int main() {
-    WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
+    // Cross-platform socket initialization
+    if (!InitializeSockets()) return 1;
+
     SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr = { AF_INET, htons(8001), INADDR_ANY };
     bind(server_fd, (sockaddr*)&addr, sizeof(addr));
@@ -107,7 +107,7 @@ int main() {
         SOCKET client = accept(server_fd, NULL, NULL);
         char buffer[1024] = {0};
         int bytes = recv(client, buffer, sizeof(buffer) - 1, 0);
-        if (bytes <= 0) { closesocket(client); continue; }
+        if (bytes <= 0) { CLOSE_SOCKET(client); continue; }
 
         std::string request(buffer);
         std::stringstream ss(request);
@@ -127,7 +127,7 @@ int main() {
         }
         else if (command == "REGISTER") {
             std::string filename, fileHash; int numChunks;
-            ss >> filename >> numChunks >> fileHash; // Now expects hash from client
+            ss >> filename >> numChunks >> fileHash; 
 
             std::lock_guard<std::mutex> lock(globalMtx);
             std::vector<int> currentPorts;
@@ -177,8 +177,9 @@ int main() {
                 int end = -1; sendAll(client, (char*)&end, sizeof(end));
             }
         }
-        closesocket(client);
+        CLOSE_SOCKET(client);
     }
-    WSACleanup();
+    
+    CleanupSockets();
     return 0;
 }

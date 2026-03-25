@@ -1,6 +1,5 @@
 #include <iostream>
 #include <fstream>
-#include <winsock2.h>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -18,8 +17,7 @@
 #include <sstream>
 #include "../common/services/FileChunker.h"
 #include "../common/utils/SHA256.h"
-
-#pragma comment(lib, "ws2_32.lib")
+#include "../common/utils/SocketWrapper.h" 
 
 // --- UTILS ---
 
@@ -47,11 +45,21 @@ SOCKET connectToServer(int port) {
     SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr = { AF_INET, htons(port) };
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+#ifdef _WIN32
     int timeout = 5000;
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+#else
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+#endif
+
     if (connect(sock, (sockaddr *)&addr, sizeof(addr)) < 0) {
-        closesocket(sock);
+        CLOSE_SOCKET(sock);
         return INVALID_SOCKET;
     }
     return sock;
@@ -118,19 +126,19 @@ void printProgressBar(std::string label, long long current, long long total, dou
 
 // --- MAIN ---
 
-int main() {
-    WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
+int main(int argc, char* argv[]) {
+    // Cross-platform socket initialization
+    if (!InitializeSockets()) return 1;
 
-    if (__argc < 3) {
+    if (argc < 3) {
         std::cout << "Usage: client_app upload|download|sync <filepath>\n";
         return 1;
     }
 
-    std::string mode = __argv[1];
-    std::string filepath = __argv[2];
+    std::string mode = argv[1];
+    std::string filepath = argv[2];
     std::string filename = extractFileName(filepath);
 
-    // Discovery
     std::vector<int> storagePorts;
     SOCKET liveSock = connectToServer(8001);
     if (liveSock != INVALID_SOCKET) {
@@ -142,7 +150,7 @@ int main() {
             std::stringstream ss(buffer);
             int p; while (ss >> p) storagePorts.push_back(p);
         }
-        closesocket(liveSock);
+        CLOSE_SOCKET(liveSock);
     }
 
     // UPLOAD / SYNC
@@ -166,7 +174,7 @@ int main() {
         if (metaSock != INVALID_SOCKET) {
             std::string req = "REGISTER " + filename + " " + std::to_string(chunks.size()) + " " + fileHash;
             sendAll(metaSock, req.c_str(), (int)req.size() + 1);
-            closesocket(metaSock);
+            CLOSE_SOCKET(metaSock);
         }
 
         std::atomic<long long> uploadedBytes(0);
@@ -192,7 +200,7 @@ int main() {
                             sendAll(storSock, (char *)&cSize, sizeof(cSize));
                             if (sendAll(storSock, chunks[i].data.data(), cSize)) { uploadedBytes += cSize; success = true; }
                         }
-                        closesocket(storSock);
+                        CLOSE_SOCKET(storSock);
                     }
                 });
             }
@@ -231,7 +239,7 @@ int main() {
             for (int i = 0; i < count; i++) recvAll(metaSock, (char *)&ports[i], sizeof(int));
             chunkMap.push_back({id, ports});
         }
-        closesocket(metaSock);
+        CLOSE_SOCKET(metaSock);
 
         if (chunkMap.empty()) { std::cout << "Error: File metadata not found.\n"; return 1; }
 
@@ -261,10 +269,10 @@ int main() {
                             downloadedBytes += sz;
                             std::lock_guard<std::mutex> lock(mtxMap);
                             received.emplace(rid, Chunk(rid, buf));
-                            closesocket(sock); break;
+                            CLOSE_SOCKET(sock); break;
                         }
                     }
-                    closesocket(sock);
+                    CLOSE_SOCKET(sock);
                 } 
             });
         }
@@ -282,7 +290,6 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
 
-        // --- CRITICAL FIX: Join threads before evaluating results to prevent crash ---
         downloadPool.shutdown(); 
 
         if (isStalled) {
@@ -297,5 +304,6 @@ int main() {
         }
     }
 
-    WSACleanup(); return 0;
+    CleanupSockets();
+    return 0;
 }

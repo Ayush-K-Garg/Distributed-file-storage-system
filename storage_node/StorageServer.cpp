@@ -1,17 +1,14 @@
 #include <iostream>
-#include <winsock2.h>
 #include <vector>
 #include <fstream>
 #include <string>
-#include <direct.h>
 #include <thread>
 #include <queue>
 #include <mutex>
 #include <condition_variable>
 #include <algorithm>
 #include <chrono>
-
-#pragma comment(lib, "ws2_32.lib")
+#include "../common/utils/SocketWrapper.h" 
 
 std::queue<SOCKET> taskQueue;
 std::mutex mtx;
@@ -27,7 +24,7 @@ void notifyMeta(int myPort, std::string cmd) {
         std::string msg = cmd + " " + std::to_string(myPort);
         send(sock, msg.c_str(), (int)msg.size() + 1, 0);
     }
-    closesocket(sock);
+    CLOSE_SOCKET(sock);
 }
 
 // Background thread to send heartbeats every 2 seconds
@@ -70,7 +67,7 @@ void worker(int port, std::string folder) {
 
         char command[10] = {0};
         if (!recvAll(client_socket, command, 10)) {
-            closesocket(client_socket);
+            CLOSE_SOCKET(client_socket);
             continue;
         }
 
@@ -131,7 +128,7 @@ void worker(int port, std::string folder) {
                 std::cout << "[PORT " << port << "] Sent Chunk " << chunkId << "\n";
             }
         }
-        closesocket(client_socket);
+        CLOSE_SOCKET(client_socket);
     }
 }
 
@@ -140,13 +137,11 @@ int main(int argc, char* argv[]) {
     int port = atoi(argv[1]);
     std::string folder = argv[2];
 
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2,2), &wsa);
+    if (!InitializeSockets()) return 1;
 
-    _mkdir("data");
-    _mkdir(folder.c_str());
+    MKDIR("data"); 
+    MKDIR(folder.c_str());
 
-    // --- New Discovery Logic ---
     notifyMeta(port, "JOIN");
     std::thread(heartbeatLoop, port).detach();
 
@@ -169,4 +164,5 @@ int main(int argc, char* argv[]) {
         }
         cv.notify_one();
     }
+    CleanupSockets();
 }

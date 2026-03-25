@@ -1,0 +1,40 @@
+#ifndef SOCKET_WRAPPER_H
+#define SOCKET_WRAPPER_H
+
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #include <direct.h> // for _mkdir
+    #pragma comment(lib, "ws2_32.lib")
+    typedef int socklen_t;
+    #define CLOSE_SOCKET(s) closesocket(s)
+    #define MKDIR(path) _mkdir(path)
+#else
+    #include <sys/socket.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>
+    #include <sys/stat.h>
+    #include <sys/types.h>
+    #include <netinet/in.h>
+    typedef int SOCKET;
+    #define INVALID_SOCKET  (SOCKET)(~0)
+    #define SOCKET_ERROR            (-1)
+    #define CLOSE_SOCKET(s) close(s)
+    #define MKDIR(path) mkdir(path, 0777)
+#endif
+
+inline bool InitializeSockets() {
+#ifdef _WIN32
+    WSADATA wsa;
+    return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+#endif
+    return true;
+}
+
+inline void CleanupSockets() {
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+#endif

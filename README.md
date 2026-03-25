@@ -102,6 +102,8 @@ g++ storage_node/StorageServer.cpp -o node -lws2_32
 # Compile Client (Include SHA256 and Chunker)
 g++ client/main.cpp common/services/FileChunker.cpp -o client_app -lws2_32
 
+g++ client/main.cpp common/services/FileChunker.cpp common/models/Chunk.cpp -o client_app -lws2_32
+
 
 Execution
 Start Metadata Server:
