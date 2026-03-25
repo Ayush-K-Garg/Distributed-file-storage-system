@@ -17,12 +17,11 @@
 #include <iomanip>
 #include <sstream>
 #include "../common/services/FileChunker.h"
+#include "../common/utils/SHA256.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
-// =========================
-// UTILS
-// =========================
+// --- UTILS ---
 
 bool recvAll(SOCKET sock, char *buffer, int size) {
     int total = 0;
@@ -48,12 +47,9 @@ SOCKET connectToServer(int port) {
     SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr = { AF_INET, htons(port) };
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-
-    // Set 5-second connection timeout
     int timeout = 5000;
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-
     if (connect(sock, (sockaddr *)&addr, sizeof(addr)) < 0) {
         closesocket(sock);
         return INVALID_SOCKET;
@@ -66,9 +62,7 @@ std::string extractFileName(const std::string &path) {
     return (pos == std::string::npos) ? path : path.substr(pos + 1);
 }
 
-// =========================
-// THREAD POOL
-// =========================
+// --- THREAD POOL ---
 
 class ThreadPool {
 public:
@@ -90,19 +84,13 @@ public:
         }
     }
     void enqueue(std::function<void()> task) {
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            tasks.push(task);
-        }
+        { std::lock_guard<std::mutex> lock(mtx); tasks.push(task); }
         cv.notify_one();
     }
     void shutdown() {
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            stop = true;
-        }
+        { std::lock_guard<std::mutex> lock(mtx); stop = true; }
         cv.notify_all();
-        for (auto &t : workers) t.join();
+        for (auto &t : workers) if(t.joinable()) t.join();
     }
 private:
     std::vector<std::thread> workers;
@@ -112,15 +100,11 @@ private:
     bool stop;
 };
 
-// =========================
-// UI HELPERS
-// =========================
-
 void printProgressBar(std::string label, long long current, long long total, double speedMB) {
+    if (total <= 0) return; 
     int barWidth = 40;
-    double progress = (total > 0) ? (double)current / total : 0;
+    double progress = (double)current / total;
     if (progress > 1.0) progress = 1.0;
-
     std::cout << "\r" << label << ": [";
     int pos = (int)(barWidth * progress);
     for (int i = 0; i < barWidth; ++i) {
@@ -132,13 +116,10 @@ void printProgressBar(std::string label, long long current, long long total, dou
     std::cout.flush();
 }
 
-// =========================
-// MAIN
-// =========================
+// --- MAIN ---
 
 int main() {
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+    WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
 
     if (__argc < 3) {
         std::cout << "Usage: client_app upload|download|sync <filepath>\n";
@@ -149,6 +130,7 @@ int main() {
     std::string filepath = __argv[2];
     std::string filename = extractFileName(filepath);
 
+    // Discovery
     std::vector<int> storagePorts;
     SOCKET liveSock = connectToServer(8001);
     if (liveSock != INVALID_SOCKET) {
@@ -158,43 +140,31 @@ int main() {
         int bytes = recv(liveSock, buffer, sizeof(buffer) - 1, 0);
         if (bytes > 0) {
             std::stringstream ss(buffer);
-            int p;
-            while (ss >> p) storagePorts.push_back(p);
+            int p; while (ss >> p) storagePorts.push_back(p);
         }
         closesocket(liveSock);
     }
 
-    if (storagePorts.empty()) {
-        std::cout << "Error: No storage nodes online.\n";
-        return 1;
-    }
-
-    std::ifstream fileInfo(filepath, std::ios::binary | std::ios::ate);
-    long long fileSize = (fileInfo) ? (long long)fileInfo.tellg() : 0;
-    if (fileInfo) fileInfo.close();
-
-    int chunkSize;
-    if (fileSize < 1024 * 1024) chunkSize = 64 * 1024;
-    else if (fileSize < 50 * 1024 * 1024) chunkSize = 256 * 1024;
-    else if (fileSize < 500 * 1024 * 1024) chunkSize = 1024 * 1024;
-    else if (fileSize < 2LL * 1024 * 1024 * 1024) chunkSize = 4 * 1024 * 1024;
-    else chunkSize = 8 * 1024 * 1024;
-
-    FileChunker chunker(chunkSize);
-
-    // =========================
-    // UPLOAD
-    // =========================
+    // UPLOAD / SYNC
     if (mode == "upload" || mode == "sync") {
+        if (storagePorts.empty()) { std::cout << "Error: No storage nodes online.\n"; return 1; }
+        
+        std::string fileHash = SHA256::hashFile(filepath);
+        if(fileHash == "") { std::cout << "Error: Source file missing or unreadable.\n"; return 1; }
+
+        std::ifstream fileInfo(filepath, std::ios::binary | std::ios::ate);
+        long long fileSize = (long long)fileInfo.tellg(); fileInfo.close();
+        
+        int chunkSize = (fileSize < 500*1024*1024) ? 1024*1024 : 4*1024*1024;
+        FileChunker chunker(chunkSize);
         std::vector<Chunk> chunks = chunker.split(filepath);
+        
         long long totalUploadSize = 0;
-        for (const auto &c : chunks) {
-            totalUploadSize += (c.data.size() * ((storagePorts.size() > 1) ? 2 : 1));
-        }
+        for (const auto &c : chunks) totalUploadSize += (c.data.size() * ((storagePorts.size() > 1) ? 2 : 1));
 
         SOCKET metaSock = connectToServer(8001);
         if (metaSock != INVALID_SOCKET) {
-            std::string req = "REGISTER " + filename + " " + std::to_string(chunks.size());
+            std::string req = "REGISTER " + filename + " " + std::to_string(chunks.size()) + " " + fileHash;
             sendAll(metaSock, req.c_str(), (int)req.size() + 1);
             closesocket(metaSock);
         }
@@ -207,15 +177,12 @@ int main() {
             std::vector<int> targets;
             targets.push_back(storagePorts[i % storagePorts.size()]);
             if (storagePorts.size() > 1) targets.push_back(storagePorts[(i + 1) % storagePorts.size()]);
-
             for (int port : targets) {
                 uploadPool.enqueue([&uploadedBytes, &chunks, i, port, filename]() {
-                    int retries = 3;
-                    bool success = false;
-                    while (retries-- > 0 && !success) {
+                    int retries = 2; bool success = false;
+                    while (retries-- >= 0 && !success) {
                         SOCKET storSock = connectToServer(port);
                         if (storSock == INVALID_SOCKET) continue;
-
                         if (sendAll(storSock, "UPLOAD", 10)) {
                             int nLen = (int)filename.size();
                             sendAll(storSock, (char *)&nLen, sizeof(nLen));
@@ -223,100 +190,78 @@ int main() {
                             sendAll(storSock, (char *)&chunks[i].id, sizeof(chunks[i].id));
                             int cSize = (int)chunks[i].data.size();
                             sendAll(storSock, (char *)&cSize, sizeof(cSize));
-                            if (sendAll(storSock, chunks[i].data.data(), cSize)) {
-                                uploadedBytes += cSize;
-                                success = true;
-                            }
+                            if (sendAll(storSock, chunks[i].data.data(), cSize)) { uploadedBytes += cSize; success = true; }
                         }
                         closesocket(storSock);
                     }
                 });
             }
         }
-
-        long long lastUpBytes = 0;
-        auto lastUpTime = std::chrono::steady_clock::now();
-
+        
+        long long lastUp = 0; auto lastUpTime = std::chrono::steady_clock::now();
         while (uploadedBytes < totalUploadSize) {
-            long long currentUp = uploadedBytes.load();
-            if (currentUp > lastUpBytes) {
-                lastUpBytes = currentUp;
-                lastUpTime = std::chrono::steady_clock::now();
-            } else if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - lastUpTime).count() > 15) {
-                std::cout << "\nError: Upload stalled (Node timeout).\n";
-                break;
-            }
-
-            auto now = std::chrono::steady_clock::now();
-            double elapsed = std::chrono::duration<double>(now - startTime).count();
-            double speed = (elapsed > 0) ? (currentUp / 1024.0 / 1024.0) / elapsed : 0;
-            printProgressBar("Uploading", currentUp, totalUploadSize, speed);
+            long long cur = uploadedBytes.load();
+            if (cur > lastUp) { lastUp = cur; lastUpTime = std::chrono::steady_clock::now(); }
+            else if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - lastUpTime).count() > 10) break;
+            printProgressBar("Uploading", cur, totalUploadSize, (cur/1024.0/1024.0)/std::chrono::duration<double>(std::chrono::steady_clock::now()-startTime).count());
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
         uploadPool.shutdown();
         std::cout << "\nUpload complete.\n";
     }
 
-    // =========================
-    // GET METADATA
-    // =========================
-    SOCKET metaSock = connectToServer(8001);
-    if (metaSock == INVALID_SOCKET) return 1;
-
-    std::string getReq = "GET " + filename;
-    sendAll(metaSock, getReq.c_str(), (int)getReq.size() + 1);
-
-    std::vector<std::pair<int, std::vector<int>>> chunkMap;
-    while (true) {
-        int id;
-        if (!recvAll(metaSock, (char *)&id, sizeof(id)) || id == -1) break;
-        int count;
-        recvAll(metaSock, (char *)&count, sizeof(count));
-        std::vector<int> ports(count);
-        for (int i = 0; i < count; i++) recvAll(metaSock, (char *)&ports[i], sizeof(int));
-        chunkMap.push_back({id, ports});
-    }
-    closesocket(metaSock);
-
-    // =========================
-    // DOWNLOAD
-    // =========================
+    // DOWNLOAD / SYNC
     if (mode == "download" || mode == "sync") {
-        ThreadPool pool(8);
-        std::map<int, Chunk> received;
-        std::mutex mtxMap;
+        SOCKET metaSock = connectToServer(8001);
+        if (metaSock == INVALID_SOCKET) return 1;
+        std::string getReq = "GET " + filename;
+        sendAll(metaSock, getReq.c_str(), (int)getReq.size() + 1);
+
+        std::string expectedHash = ""; int hLen;
+        if (recvAll(metaSock, (char*)&hLen, sizeof(hLen))) {
+            std::vector<char> hBuf(hLen); recvAll(metaSock, hBuf.data(), hLen);
+            expectedHash.assign(hBuf.begin(), hBuf.end());
+        }
+
+        std::vector<std::pair<int, std::vector<int>>> chunkMap;
+        while (true) {
+            int id; if (!recvAll(metaSock, (char *)&id, sizeof(id)) || id == -1) break;
+            int count; recvAll(metaSock, (char *)&count, sizeof(count));
+            std::vector<int> ports(count);
+            for (int i = 0; i < count; i++) recvAll(metaSock, (char *)&ports[i], sizeof(int));
+            chunkMap.push_back({id, ports});
+        }
+        closesocket(metaSock);
+
+        if (chunkMap.empty()) { std::cout << "Error: File metadata not found.\n"; return 1; }
+
+        // Pre-flight check: ensure at least one node is online
+        bool nodesReady = false;
+        for(auto &p : chunkMap) if(!p.second.empty()) nodesReady = true;
+        if(!nodesReady) { std::cout << "Error: All storage replicas are currently OFFLINE.\n"; return 1; }
+
+        ThreadPool downloadPool(8);
+        std::map<int, Chunk> received; std::mutex mtxMap;
         std::atomic<long long> downloadedBytes(0);
         auto startTime = std::chrono::steady_clock::now();
         
-        size_t lastChunkCount = 0;
-        auto lastProgressTime = std::chrono::steady_clock::now();
-        bool isStalled = false;
-
         for (auto &p : chunkMap) {
-            int targetId = p.first;
-            auto targetPorts = p.second;
-            pool.enqueue([&received, &mtxMap, &downloadedBytes, targetId, targetPorts, filename]() {
-                for (int port : targetPorts) {
-                    SOCKET sock = connectToServer(port);
-                    if (sock == INVALID_SOCKET) continue;
-
+            int tid = p.first; auto tports = p.second;
+            downloadPool.enqueue([&received, &mtxMap, &downloadedBytes, tid, tports, filename]() {
+                for (int port : tports) {
+                    SOCKET sock = connectToServer(port); if (sock == INVALID_SOCKET) continue;
                     sendAll(sock, "GET_CHUNK", 10);
-                    int nLen = (int)filename.size();
-                    sendAll(sock, (char*)&nLen, sizeof(nLen));
-                    sendAll(sock, filename.c_str(), nLen);
-                    sendAll(sock, (char*)&targetId, sizeof(targetId));
-
-                    int respId;
-                    if (recvAll(sock, (char*)&respId, sizeof(respId)) && respId != -1) {
-                        int size;
-                        recvAll(sock, (char*)&size, sizeof(size));
-                        std::vector<char> buffer(size);
-                        if (recvAll(sock, buffer.data(), size)) {
-                            downloadedBytes += size;
+                    int nLen = (int)filename.size(); sendAll(sock, (char*)&nLen, sizeof(nLen));
+                    sendAll(sock, filename.c_str(), nLen); sendAll(sock, (char*)&tid, sizeof(tid));
+                    int rid;
+                    if (recvAll(sock, (char*)&rid, sizeof(rid)) && rid != -1) {
+                        int sz; recvAll(sock, (char*)&sz, sizeof(sz));
+                        std::vector<char> buf(sz);
+                        if (recvAll(sock, buf.data(), sz)) {
+                            downloadedBytes += sz;
                             std::lock_guard<std::mutex> lock(mtxMap);
-                            received.emplace(respId, Chunk(respId, buffer));
-                            closesocket(sock);
-                            break; 
+                            received.emplace(rid, Chunk(rid, buf));
+                            closesocket(sock); break;
                         }
                     }
                     closesocket(sock);
@@ -324,41 +269,33 @@ int main() {
             });
         }
 
+        size_t lastCount = 0; auto lastProgress = std::chrono::steady_clock::now();
+        bool isStalled = false;
         while (true) {
-            size_t currentCount;
-            {
-                std::lock_guard<std::mutex> lock(mtxMap);
-                currentCount = received.size();
+            size_t cur; { std::lock_guard<std::mutex> lock(mtxMap); cur = received.size(); }
+            if (cur == chunkMap.size()) break;
+            if (cur > lastCount) { lastCount = cur; lastProgress = std::chrono::steady_clock::now(); }
+            else if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - lastProgress).count() >= 12) {
+                isStalled = true; break;
             }
-
-            if (currentCount == chunkMap.size()) break;
-
-            if (currentCount > lastChunkCount) {
-                lastChunkCount = currentCount;
-                lastProgressTime = std::chrono::steady_clock::now();
-            } else if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - lastProgressTime).count() >= 15) {
-                isStalled = true;
-                break;
-            }
-
-            auto now = std::chrono::steady_clock::now();
-            double elapsed = std::chrono::duration<double>(now - startTime).count();
-            double speed = (elapsed > 0) ? (downloadedBytes / 1024.0 / 1024.0) / elapsed : 0;
-            printProgressBar("Downloading", downloadedBytes, (long long)chunkMap.size() * chunkSize, speed);
+            printProgressBar("Downloading", (long long)cur, (long long)chunkMap.size(), (downloadedBytes/1024.0/1024.0)/std::chrono::duration<double>(std::chrono::steady_clock::now()-startTime).count());
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
 
+        // --- CRITICAL FIX: Join threads before evaluating results to prevent crash ---
+        downloadPool.shutdown(); 
+
         if (isStalled) {
-            std::cout << "\n\nError: Download stalled (Replicas offline).\n";
+            std::cout << "\n\nError: Download stalled. Some chunks were unreachable.\n";
         } else {
-            pool.shutdown();
             std::vector<Chunk> finalChunks;
             for (auto &p : received) finalChunks.push_back(p.second);
-            chunker.merge("downloaded_" + filename, finalChunks);
-            std::cout << "\nDownload complete and verified.\n";
+            std::string out = "downloaded_" + filename;
+            FileChunker(1024).merge(out, finalChunks);
+            if (SHA256::hashFile(out) == expectedHash) std::cout << "\nVerified [MATCH].\n";
+            else std::cout << "\nVerification [FAILED] - Content mismatch.\n";
         }
     }
 
-    WSACleanup();
-    return 0;
+    WSACleanup(); return 0;
 }
