@@ -1,6 +1,6 @@
 # Distributed High-Performance File Storage System (C++)
 
-A robust, self-healing, multi-threaded distributed storage system built in C++ using TCP sockets. This system achieves high-speed data transfer through parallel chunking, thread pooling, replication (RF = 2), and end-to-end integrity verification (SHA-256). It is built on a Universal Multi-Node Architecture, supporting deployment across multiple physical machines and local Docker environments simultaneously.
+A robust, self-healing, multi-threaded distributed storage system built in C++ using TCP sockets. This system achieves high-speed data transfer through parallel chunking, thread pooling, replication (RF = 2), and end-to-end integrity verification (SHA-256). It is built on a Universal Multi-Node Architecture, supporting deployment across local terminals, Docker environments, LAN (same Wi-Fi), and Global Networks (different Wi-Fi via Tailscale VPN) simultaneously.
 
 ---
 
@@ -30,20 +30,21 @@ The system follows a decentralized cluster architecture with three main componen
 
 - Central interface for all file operations, supporting both absolute and relative paths.
 - **Adaptive Chunking:** Dynamically scales chunk sizes from 1 MB up to 128 MB based on file size to optimize HDD throughput.
-- **Smart Routing:** Automatically detects whether a node is local, Docker-based, or remote.
-- Uses a `ThreadPool` (2/8 threads) for parallel I/O.
+- **Smart Routing:** Automatically detects whether a node is local, Docker-based, LAN-remote, or globally remote.
+- **Global Reach:** Supports Tailscale Tunneling, allowing the client to communicate with nodes across different networks and locations via secure `100.x.x.x` Tailscale mesh IPs.
+- Uses a `ThreadPool` (2 threads for cross-device / 8 threads for local) for parallel I/O.
 
 ### Metadata Registry (MetaServer)
 
 - Runs on **Port 8001**.
-- **IP-Aware Discovery:** Tracks dynamic `IP:Port` pairs for all joining nodes (Localhost, Docker Bridge, or LAN).
+- **IP-Aware Discovery:** Tracks dynamic `IP:Port` pairs for all joining nodes (Localhost, Docker Bridge, LAN, or Tailscale Mesh VPN).
 - Maintains persistent chunk-to-node mapping in `data/registry.db`.
 
 ### Storage Node Workers
 
 - Independent processes (native or Dockerized).
 - **High-Capacity Storage:** Designed to utilize secondary drives (e.g., 1 TB HDDs) via volume mapping.
-- **Heartbeat Mechanism:** Reports health and current network IP to the MetaServer every 2 seconds.
+- **Heartbeat Mechanism:** Reports health and current network IP (LAN or Tailscale) to the MetaServer every 2 seconds.
 
 ---
 
@@ -52,17 +53,17 @@ The system follows a decentralized cluster architecture with three main componen
 ```
 +----------------------------------------------------------+
 |               UNIVERSAL CLIENT ORCHESTRATOR              |
-|      (Smart Routing | ThreadPool | Parallel I/O)         |
+|    (Smart Routing | ThreadPool | Tailscale Tunnel)       |
 +---------------+---------------+--------------+-----------+
                 |               |              |
       1. REGISTER/GET_NODES     |       2. DYNAMIC IP LIST
-                |               |       (e.g., 192.168.1.15:9001)
+                |               |  (127.0.0.1 | 192.168.x.x | 100.x.x.x)
 +---------------v---------------+--------------v-----------+
 |                 METADATA SERVER (Port 8001)              |
 |       (IP-Aware Registry | Heartbeat | registry.db)      |
 +---------------^-------------------------------^-----------+
                 |                               |
-       4. JOIN (127.0.0.1)              4. JOIN (192.168.1.19)
+       4. JOIN (127.0.0.1)         4. JOIN (LAN / Tailscale IP)
                 |                               |
 +---------------+-----------+     +-------------+-----------+
 |   LOCAL NODE (9001)       |     |   REMOTE NODE (9005)    |
@@ -72,7 +73,7 @@ The system follows a decentralized cluster architecture with three main componen
                 +---------------+---------------+
                                 |
                 3. REPLICATED DATA TRANSFER (RF=2)
-                     (Parallel TCP over Wi-Fi/LAN)
+                     (Parallel TCP over LAN / WAN)
 ```
 
 ---
@@ -98,11 +99,12 @@ The system follows a decentralized cluster architecture with three main componen
 
 ## Universal Networking and Smart Routing
 
-The system handles three distinct network environments simultaneously.
+The system handles four distinct network environments simultaneously via a unified smart routing layer. The `META_HOST` environment variable drives context selection at startup.
 
-- **Local Native:** Nodes running in standard terminals on the host machine (`127.0.0.1`).
+- **Local Native:** Nodes running in standard terminals on the host machine (`127.0.0.1`). No environment variable required; defaults automatically.
 - **Local Docker:** Nodes running in Docker on the host machine. The client automatically routes internal bridge IPs (`172.18.x.x`) to `127.0.0.1` to traverse the Docker NAT via mapped ports.
-- **Remote Hardware:** Nodes running on a separate server machine over Wi-Fi (`192.168.x.x`). The client connects directly to the remote LAN IP.
+- **Remote LAN (Same Wi-Fi):** Nodes running on a separate server machine over the same local Wi-Fi network (`192.168.x.x`). The client connects directly to the LAN IP.
+- **Global WAN (Different Wi-Fi — Tailscale):** Utilizes Tailscale VPN to create a secure peer-to-peer mesh network. Nodes on entirely different networks or in different cities connect via permanent `100.x.x.x` Tailscale IPs, bypassing NAT and firewall restrictions without requiring any port forwarding configuration.
 
 ---
 
@@ -128,14 +130,24 @@ For a 1 TB mechanical HDD, writing thousands of small files causes disk thrashin
 
 - **Advantage:** Larger chunks promote sequential write operations on the mechanical drive, significantly increasing transfer speeds and reducing disk wear over time.
 
+### Thread Pool Tuning (Context-Aware Concurrency)
+
+The thread count is tuned based on the deployment context to balance throughput against overhead.
+
+| Deployment Mode | Thread Count | Rationale |
+|-----------------|-------------|-----------|
+| Local (SSD, single machine) | 8 threads | High-bandwidth local I/O benefits from maximum parallelism |
+| Cross-device (LAN / Tailscale) | 2 threads | Reduces context-switching overhead on mechanical drives; network latency is the bottleneck, not thread count |
+
 ---
 
 ## Key Technical Features
 
 ### Parallel Transfer Engine
 
-- Custom `ThreadPool` with 2/8 threads for concurrent multi-stream TCP transfers.
-- Local transfer speeds of approximately **1.1 GB/s** and speed across multiple computers approximated=ly **5-6 MB/s** (increased using reducing threads to 2 by reducing overhead of context switching)
+- Custom `ThreadPool` with **8 threads** for local SSD transfers and **2 threads** for cross-device transfers over LAN or Tailscale.
+- Local transfer speeds of approximately **1.1 GB/s**.
+- Cross-device transfer speeds optimized to approximately **5–6 MB/s**, achieved by reducing thread contention and context-switching overhead on mechanical drives over a network link.
 - **End-to-End Integrity:** SHA-256 verification ensures data consistency across all nodes, including remote ones.
 - **Metadata Journaling:** Persistent cluster state saved in `data/registry.db`, surviving full restarts.
 - **Replication Factor (RF = 2):** Every chunk is written to two independent nodes, ensuring data availability during single-node failures.
@@ -163,23 +175,30 @@ g++ client/main.cpp common/services/FileChunker.cpp common/models/Chunk.cpp -o c
 
 ---
 
-### Execution (Native Terminal)
+### Execution — Mode 1: Local (Single Machine, Native Terminals)
 
-**Step 1 — Run Meta Server (Terminal 1)**
+All components run on the same machine. No environment variable required; `META_HOST` defaults to `127.0.0.1`.
+
+**Terminal 1 — Start Meta Server**
 ```powershell
 .\meta
 ```
 
-**Step 2 — Run Storage Nodes (Terminal 2 and Terminal 3)**
+**Terminal 2 — Start Storage Node 1**
 ```powershell
-# Format: .\node_app <PORT> <DATA_DIRECTORY>
 .\node_app 9001 data/node1
+```
+
+**Terminal 3 — Start Storage Node 2**
+```powershell
 .\node_app 9002 data/node2
 ```
 
 ---
 
-### Execution (Docker Orchestration)
+### Execution — Mode 2: Local Docker (Single Machine, Containerized Nodes)
+
+Nodes run inside Docker containers on the same host. The client routes Docker bridge IPs automatically.
 
 **Start the full cluster**
 ```bash
@@ -195,6 +214,45 @@ docker-compose down
 ```bash
 docker-compose logs -f meta-server
 ```
+
+---
+
+### Execution — Mode 3: Multi-Machine LAN (Same Wi-Fi Network)
+
+The MetaServer runs on the host machine. The server machine joins via its LAN IP.
+
+**Host Machine — Start Meta Server and local nodes (Terminals 1, 2, 3)**
+```powershell
+.\meta
+.\node_app 9001 data/node1
+.\node_app 9002 data/node2
+```
+
+**Server Machine — Set META_HOST to the host machine's LAN IP and start a node**
+```powershell
+$env:META_HOST="192.168.1.15"
+.\node_app 9005 data/remote_node
+```
+
+---
+
+### Execution — Mode 4: Global Multi-Machine (Different Wi-Fi via Tailscale)
+
+Both machines must have [Tailscale](https://tailscale.com) installed and be logged into the same Tailscale account. Each machine receives a permanent `100.x.x.x` Tailscale IP.
+
+**Host Machine — Start Meta Server (no variable needed; Tailscale routes automatically)**
+```powershell
+.\meta
+.\node_app 9001 data/node1
+```
+
+**Server Machine — Set META_HOST to the host machine's Tailscale IP**
+```powershell
+$env:META_HOST="100.80.1.2"
+.\node_app 9005 data/remote_node
+```
+
+> Replace `100.80.1.2` with the actual Tailscale IP shown in the Tailscale admin dashboard for the host machine.
 
 ---
 
@@ -223,22 +281,27 @@ The client is location-agnostic. Files can be uploaded from any path on the syst
 
 ## Multi-Machine Deployment
 
-To use a server machine as a dedicated 1 TB storage vault, follow the steps below.
+### Scenario A — Same Wi-Fi (LAN)
 
-### Prerequisites
+Set `META_HOST` to the host machine's LAN IP (e.g., `192.168.1.15`) on the server machine before launching any node process or Docker container.
 
-1. Ensure both the host machine and the server machine are connected to the same Wi-Fi network.
-2. Identify the host machine's local IP address (e.g., `192.168.1.15`).
-3. Create the storage directory `D:/CloudVault` on the server machine.
+### Scenario B — Global Access (Tailscale VPN)
 
-### Server Machine — `docker-compose.yml` Configuration
+To use a server machine in a different location as a dedicated 1 TB storage vault over the internet:
 
+**Prerequisites**
+1. Install Tailscale on both the host machine and the server machine.
+2. Log both into the same Tailscale account. Each machine will receive a permanent `100.x.x.x` IP.
+3. Identify the host machine's Tailscale IP from the Tailscale admin dashboard (e.g., `100.80.1.2`).
+4. Create the storage directory `D:/CloudVault` on the server machine.
+
+**Server Machine — `docker-compose.yml` Configuration (Global)**
 ```yaml
 services:
-  node1:
+  node_global:
     build: .
     environment:
-      - META_HOST=192.168.1.15  # IP address of the host machine
+      - META_HOST=100.80.1.2  # Tailscale IP of the host machine
     ports:
       - "9005:9005"
     command: ["./node_app", "9005", "data/node1"]
@@ -246,23 +309,23 @@ services:
       - D:/CloudVault/node1:/usr/src/app/data/node1
 ```
 
-### Deploy on Server Machine
-
+**Deploy on Server Machine**
 ```bash
 docker-compose up --build
 ```
 
-Once running, the server node automatically joins the cluster by registering with the MetaServer on the host machine. No changes are required on the host side.
+Once running, the server node registers with the MetaServer on the host machine through the Tailscale tunnel. No port forwarding or firewall changes are required on either machine.
 
 ---
 
 ## Fault Tolerance and Chaos Testing
 
-| Scenario | Command | Expected Behavior |
-|----------|---------|-------------------|
+| Scenario | Command / Action | Expected Behavior |
+|----------|-----------------|-------------------|
 | Node Failure | `docker-compose stop node1` | Data is retrieved from the replica node on the server machine |
 | Cluster Restart | `docker-compose down` then `docker-compose up` | Registry is loaded from `registry.db`; all nodes rejoin automatically |
-| Network Partition | Disconnect server machine from Wi-Fi | Host-local nodes continue serving data; server node re-registers on reconnect |
+| Network Partition (LAN) | Disconnect server machine from Wi-Fi | Host-local nodes continue serving data; server node re-registers on reconnect |
+| Tunnel Interruption (Tailscale) | Turn off Tailscale on server machine | Server node is marked disconnected in MetaServer; re-registers instantly on Tailscale reconnection |
 
 ---
 
@@ -271,8 +334,10 @@ Once running, the server node automatically joins the cluster by registering wit
 | Metric | Value |
 |--------|-------|
 | Local Transfer Speed | ~1.1 GB/s |
+| Remote Transfer Speed (LAN / Tailscale) | ~5–6 MB/s (network and hardware limited) |
 | Replication Factor | 2 |
-| Thread Pool Size | 8 threads for local | 2 threads for multi device
+| Thread Pool Size — Local (SSD) | 8 threads |
+| Thread Pool Size — Cross-Device (LAN / Tailscale) | 2 threads |
 | Chunk Size (Adaptive) | 1 MB to 128 MB (dynamic) |
 | Heartbeat Interval | 2 seconds |
 | MetaServer Port | 8001 |
@@ -282,11 +347,12 @@ Once running, the server node automatically joins the cluster by registering wit
 ## Learning Outcomes
 
 - Designed and implemented a distributed system from scratch using raw TCP sockets in C++.
-- Applied multi-threading via a custom `ThreadPool` to achieve true parallel I/O across physical hardware.
-- Handled heterogeneous network environments (localhost, Docker NAT, LAN) within a single smart routing layer.
-- Implemented end-to-end data integrity using SHA-256 checksums across replicated nodes.
-- Optimized for real-world hardware constraints including mechanical HDD sequential write performance via adaptive chunking.
-- Gained practical experience with Docker volume mapping and container networking for storage workloads.
+- **Advanced Networking:** Mastered NAT traversal and VPN mesh integration using Tailscale for global node communication without port forwarding.
+- Applied multi-threading via a custom `ThreadPool` to achieve true parallel I/O, with context-aware thread tuning (2 vs 8 threads) for different deployment environments.
+- Handled heterogeneous network environments (localhost, Docker NAT, LAN, WAN/Tailscale) within a single unified smart routing layer.
+- Implemented end-to-end data integrity using SHA-256 checksums across all replicated nodes, including remote ones.
+- Optimized for real-world hardware constraints including mechanical HDD sequential write performance via adaptive chunking and reduced thread contention.
+- Gained practical experience with Docker volume mapping and container networking for distributed storage workloads.
 
 ---
 
@@ -296,4 +362,4 @@ Once running, the server node automatically joins the cluster by registering wit
 National Institute of Technology (NIT), Jamshedpur
 B.Tech — Electronics and Communication Engineering
 
-This project demonstrates a production-ready private cloud architecture, optimized for real-world networking constraints and heterogeneous hardware environments.
+This project demonstrates a production-ready private cloud architecture, optimized for real-world networking constraints and heterogeneous hardware environments — from a single laptop to a globally distributed multi-machine storage cluster.

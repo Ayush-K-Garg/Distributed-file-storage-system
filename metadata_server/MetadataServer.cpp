@@ -15,7 +15,7 @@
 
 struct FileEntry {
     std::string hash;
-    // ChunkID -> List of Ports
+    // ChunkID -> List of Ports (Logic intact: Ports are the unique identifiers)
     std::vector<std::pair<int, std::vector<int>>> chunks;
 };
 
@@ -62,6 +62,7 @@ void loadRegistry() {
             FileEntry entry; entry.hash = hash;
             for (int i = 0; i < n; i++) {
                 std::string cLine; std::getline(db, cLine);
+                if (cLine.empty()) break;
                 std::stringstream css(cLine);
                 std::string cType; int cid, pCount;
                 css >> cType >> cid >> pCount;
@@ -107,6 +108,7 @@ int main() {
     if (!InitializeSockets()) return 1;
 
     SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    // Listen on ALL interfaces (Crucial for Tailscale/LAN/Localhost)
     sockaddr_in addr = { AF_INET, htons(8001), INADDR_ANY };
     
     if (bind(server_fd, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
@@ -129,8 +131,9 @@ int main() {
 
         SetTcpNoDelay(client);
 
-
-        // CAPTURE SENDER IP (Detects if it's localhost or the spare laptop)
+        // --- UNIVERSAL IP DETECTION ---
+        // This captures the IP of the sender automatically. 
+        // 127.0.0.1 for local, 172.x for Docker, 100.x for Tailscale, 192.x for LAN.
         std::string senderIP = inet_ntoa(client_addr.sin_addr);
 
         char buffer[1024] = {0};
@@ -145,7 +148,7 @@ int main() {
             int port; ss >> port;
             std::lock_guard<std::mutex> lock(globalMtx);
             
-            // Store the real IP detected from the socket
+            // Map the port to the REAL detected IP
             liveNodes[port] = {senderIP, std::time(nullptr)};
             
             if (command == "JOIN") {
@@ -173,7 +176,6 @@ int main() {
                 std::vector<std::pair<int, std::vector<int>>> chunks;
                 for (int i = 0; i < numChunks; i++) {
                     std::vector<int> replicas;
-                    // Round-robin distribution
                     replicas.push_back(currentPorts[i % currentPorts.size()]);
                     if (currentPorts.size() > 1) {
                         replicas.push_back(currentPorts[(i + 1) % currentPorts.size()]);
@@ -185,7 +187,6 @@ int main() {
                 std::cout << "Registered: " << filename << " (Replicated on " << currentPorts.size() << " nodes)" << std::endl;
             }
             
-            // Handshake confirmation
             std::string ok = "OK";
             send(client, ok.c_str(), (int)ok.size() + 1, 0);
         }
@@ -204,7 +205,7 @@ int main() {
                 sendAll(client, (char*)&hLen, sizeof(hLen));
                 sendAll(client, h.c_str(), hLen);
 
-                // 2. Send Chunk Map with Dynamic IPs
+                // 2. Send Chunk Map with IP resolution
                 for (auto &p : metadata[filename].chunks) {
                     int id = p.first;
                     std::vector<int> filteredPorts;
@@ -219,7 +220,7 @@ int main() {
                     sendAll(client, (char*)&count, sizeof(count));
 
                     for (int port : filteredPorts) {
-                        // Protocol: Send [IP length] -> [IP string] -> [Port]
+                        // Dynamically look up the IP based on the port
                         std::string nodeIP = liveNodes[port].ip;
                         int ipLen = (int)nodeIP.size();
                         sendAll(client, (char*)&ipLen, sizeof(ipLen));

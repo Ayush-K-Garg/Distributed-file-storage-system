@@ -204,7 +204,6 @@ int main(int argc, char *argv[])
         {
             std::stringstream ss(buffer);
             std::string entry;
-            // Parsing "IP:Port IP:Port"
             while (ss >> entry)
             {
                 size_t colon = entry.find(':');
@@ -220,7 +219,8 @@ int main(int argc, char *argv[])
     bool hasRemoteNodes = false;
     for (const auto &n : liveNodes)
     {
-        if (n.ip.substr(0, 3) != "127")
+        // Detect if nodes are on a different physical device (LAN, Tailscale, etc)
+        if (n.ip.substr(0, 3) != "127" && n.ip.substr(0, 4) != "172.")
         {
             hasRemoteNodes = true;
             break;
@@ -248,23 +248,14 @@ int main(int argc, char *argv[])
         fileInfo.close();
 
         long long chunkSize;
-
-        if (fileSize < 10LL * 1024 * 1024)
-            chunkSize = 1024 * 1024; // < 10MB: 1MB Chunks
-        else if (fileSize < 100LL * 1024 * 1024)
-            chunkSize = 2 * 1024 * 1024; // < 100MB: 2MB Chunks
-        else if (fileSize < 500LL * 1024 * 1024)
-            chunkSize = 4 * 1024 * 1024; // < 500MB: 4MB Chunks
-        else if (fileSize < 1024LL * 1024 * 1024)
-            chunkSize = 8 * 1024 * 1024; // < 1GB: 8MB Chunks
-        else if (fileSize < 5LL * 1024LL * 1024 * 1024)
-            chunkSize = 16 * 1024 * 1024; // < 5GB: 16MB Chunks
-        else if (fileSize < 10LL * 1024LL * 1024 * 1024)
-            chunkSize = 32 * 1024 * 1024; // < 10GB: 32MB Chunks
-        else if (fileSize < 50LL * 1024LL * 1024 * 1024)
-            chunkSize = 64 * 1024 * 1024; // < 50GB: 64MB Chunks
-        else
-            chunkSize = 128LL * 1024 * 1024; // > 50GB: 128MB Chunks
+        if (fileSize < 10LL * 1024 * 1024) chunkSize = 1024 * 1024;
+        else if (fileSize < 100LL * 1024 * 1024) chunkSize = 2 * 1024 * 1024;
+        else if (fileSize < 500LL * 1024 * 1024) chunkSize = 4 * 1024 * 1024;
+        else if (fileSize < 1024LL * 1024 * 1024) chunkSize = 8 * 1024 * 1024;
+        else if (fileSize < 5LL * 1024LL * 1024 * 1024) chunkSize = 16 * 1024 * 1024;
+        else if (fileSize < 10LL * 1024LL * 1024 * 1024) chunkSize = 32 * 1024 * 1024;
+        else if (fileSize < 50LL * 1024LL * 1024 * 1024) chunkSize = 64 * 1024 * 1024;
+        else chunkSize = 128LL * 1024 * 1024;
 
         FileChunker chunker((int)chunkSize);
         std::vector<Chunk> chunks = chunker.split(filepath);
@@ -278,8 +269,6 @@ int main(int argc, char *argv[])
         {
             std::string req = "REGISTER " + filename + " " + std::to_string(chunks.size()) + " " + fileHash;
             sendAll(metaSock, req.c_str(), (int)req.size() + 1);
-
-            // Wait for handshake to prevent "Unexpected EOF" in Docker
             char ack[10] = {0};
             recv(metaSock, ack, 10, 0);
             CLOSE_SOCKET(metaSock);
@@ -298,20 +287,22 @@ int main(int argc, char *argv[])
 
             for (auto &node : targets)
             {
-                uploadPool.enqueue([&uploadedBytes, &chunks, i, node, filename]()
-                                   {
-                    int retries = 1; bool success = false;
-                    while (retries-- >= 0 && !success) {
-                        // --- SMART ROUTING LOGIC ---
-                        // If the IP is a Docker internal bridge (172.x.x.x), 
-                        // and we are on the same laptop, use 127.0.0.1 instead.
+                uploadPool.enqueue([&uploadedBytes, &chunks, i, node, filename, metaHost]()
+                {
+                    bool success = false;
+                    int retries = 3;
+                    while (retries-- > 0 && !success) {
                         std::string targetIP = node.ip;
-                        if (targetIP.substr(0, 4) == "172.") {
+                        // Handle internal Docker routing for same-machine setups
+                        if (targetIP.substr(0, 4) == "172." && (metaHost == "127.0.0.1" || metaHost == "localhost")) {
                             targetIP = "127.0.0.1";
                         }
 
                         SOCKET storSock = connectToServer(targetIP, node.port);
-                        if (storSock == INVALID_SOCKET) continue;
+                        if (storSock == INVALID_SOCKET) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                            continue;
+                        }
                         if (sendAll(storSock, "UPLOAD", 10)) {
                             int nLen = (int)filename.size();
                             sendAll(storSock, (char *)&nLen, sizeof(nLen));
@@ -319,10 +310,15 @@ int main(int argc, char *argv[])
                             sendAll(storSock, (char *)&chunks[i].id, sizeof(chunks[i].id));
                             int cSize = (int)chunks[i].data.size();
                             sendAll(storSock, (char *)&cSize, sizeof(cSize));
-                            if (sendAll(storSock, chunks[i].data.data(), cSize)) { uploadedBytes += cSize; success = true; }
+                            if (sendAll(storSock, chunks[i].data.data(), cSize)) { 
+                                uploadedBytes += cSize; 
+                                success = true; 
+                            }
                         }
                         CLOSE_SOCKET(storSock);
-                    } });
+                        if (!success) std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    }
+                });
             }
         }
 
@@ -333,24 +329,19 @@ int main(int argc, char *argv[])
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
         uploadPool.shutdown();
-
-        
-        // Force 100% display
         printProgressBar("Uploading", totalUploadSize, totalUploadSize, (totalUploadSize / 1024.0 / 1024.0) / std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count());
         std::cout << "\nUpload complete." << std::endl;
     }
 
     if (mode == "sync") {
-    std::cout << "\n[Cooldown] Allowing remote 1TB drive to flush write buffers..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(10)); 
-}
-
+        std::cout << "\n[Cooldown] Allowing remote 1TB drive to flush write buffers..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(10)); 
+    }
 
     if (mode == "download" || mode == "sync")
     {
         SOCKET metaSock = connectToServer(metaHost, 8001);
-        if (metaSock == INVALID_SOCKET)
-            return 1;
+        if (metaSock == INVALID_SOCKET) return 1;
         std::string getReq = "GET " + filename;
         sendAll(metaSock, getReq.c_str(), (int)getReq.size() + 1);
 
@@ -364,26 +355,21 @@ int main(int argc, char *argv[])
             cleanString(expectedHash);
         }
 
-        // Updated chunkMap to store IP strings
         std::vector<std::pair<int, std::vector<std::pair<std::string, int>>>> chunkMap;
         while (true)
         {
             int id;
-            if (!recvAll(metaSock, (char *)&id, sizeof(id)) || id == -1)
-                break;
+            if (!recvAll(metaSock, (char *)&id, sizeof(id)) || id == -1) break;
             int count;
             recvAll(metaSock, (char *)&count, sizeof(count));
-
             std::vector<std::pair<std::string, int>> nodeLocations;
             for (int i = 0; i < count; i++)
             {
-                // Read IP string from protocol
                 int ipLen;
                 recvAll(metaSock, (char *)&ipLen, sizeof(ipLen));
                 std::vector<char> ipBuf(ipLen);
                 recvAll(metaSock, ipBuf.data(), ipLen);
                 std::string nodeIP(ipBuf.begin(), ipBuf.end());
-
                 int port;
                 recvAll(metaSock, (char *)&port, sizeof(port));
                 nodeLocations.push_back({nodeIP, port});
@@ -392,11 +378,7 @@ int main(int argc, char *argv[])
         }
         CLOSE_SOCKET(metaSock);
 
-        if (chunkMap.empty())
-        {
-            std::cout << "Error: File metadata not found." << std::endl;
-            return 1;
-        }
+        if (chunkMap.empty()) { std::cout << "Error: File metadata not found." << std::endl; return 1; }
 
         ThreadPool downloadPool(optimalThreads);
         std::map<int, Chunk> received;
@@ -408,46 +390,47 @@ int main(int argc, char *argv[])
         {
             int tid = p.first;
             auto locations = p.second;
-            downloadPool.enqueue([&received, &mtxMap, &downloadedBytes, tid, locations, filename]()
-                                 {
-                for (auto &loc : locations) {
-                    // --- SMART ROUTING LOGIC ---
-                    // If the IP starts with 172., it's a local Docker bridge.
-                    // Route to localhost (127.0.0.1) for Windows host-to-container communication.
-                    std::string targetIP = loc.first;
-                    if (targetIP.substr(0, 4) == "172.") {
-                        targetIP = "127.0.0.1";
-                    }
-
-                    SOCKET sock = connectToServer(targetIP, loc.second); 
-                    if (sock == INVALID_SOCKET) continue;
-                    sendAll(sock, "GET_CHUNK", 10);
-                    int nLen = (int)filename.size(); sendAll(sock, (char*)&nLen, sizeof(nLen));
-                    sendAll(sock, filename.c_str(), nLen); sendAll(sock, (char*)&tid, sizeof(tid));
-                    int rid;
-                    if (recvAll(sock, (char*)&rid, sizeof(rid)) && rid != -1) {
-                        int sz; recvAll(sock, (char*)&sz, sizeof(sz));
-                        std::vector<char> buf(sz);
-                        if (recvAll(sock, buf.data(), sz)) {
-                            downloadedBytes += sz;
-                            std::lock_guard<std::mutex> lock(mtxMap);
-                            received.emplace(rid, Chunk(rid, buf));
-                            CLOSE_SOCKET(sock); break;
+            downloadPool.enqueue([&received, &mtxMap, &downloadedBytes, tid, locations, filename, metaHost]()
+            {
+                bool success = false;
+                int retries = 5; 
+                for (int attempt = 0; attempt < retries && !success; attempt++) {
+                    for (auto &loc : locations) {
+                        std::string targetIP = loc.first;
+                        if (targetIP.substr(0, 4) == "172." && (metaHost == "127.0.0.1" || metaHost == "localhost")) {
+                            targetIP = "127.0.0.1";
                         }
+
+                        SOCKET sock = connectToServer(targetIP, loc.second); 
+                        if (sock == INVALID_SOCKET) continue;
+                        sendAll(sock, "GET_CHUNK", 10);
+                        int nLen = (int)filename.size(); sendAll(sock, (char*)&nLen, sizeof(nLen));
+                        sendAll(sock, filename.c_str(), nLen); sendAll(sock, (char*)&tid, sizeof(tid));
+                        int rid;
+                        if (recvAll(sock, (char*)&rid, sizeof(rid)) && rid != -1) {
+                            int sz; recvAll(sock, (char*)&sz, sizeof(sz));
+                            std::vector<char> buf(sz);
+                            if (recvAll(sock, buf.data(), sz)) {
+                                downloadedBytes += sz;
+                                std::lock_guard<std::mutex> lock(mtxMap);
+                                received.emplace(rid, Chunk(rid, buf));
+                                success = true;
+                                CLOSE_SOCKET(sock);
+                                break;
+                            }
+                        }
+                        CLOSE_SOCKET(sock);
                     }
-                    CLOSE_SOCKET(sock);
-                } });
+                    if (!success) std::this_thread::sleep_for(std::chrono::milliseconds((attempt + 1) * 1000));
+                }
+            });
         }
 
         while (true)
         {
             size_t cur;
-            {
-                std::lock_guard<std::mutex> lock(mtxMap);
-                cur = received.size();
-            }
-            if (cur == chunkMap.size())
-                break;
+            { std::lock_guard<std::mutex> lock(mtxMap); cur = received.size(); }
+            if (cur == chunkMap.size()) break;
             printProgressBar("Downloading", (long long)cur, (long long)chunkMap.size(), (downloadedBytes / 1024.0 / 1024.0) / std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count());
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
@@ -456,8 +439,7 @@ int main(int argc, char *argv[])
         printProgressBar("Downloading", chunkMap.size(), chunkMap.size(), (downloadedBytes / 1024.0 / 1024.0) / std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count());
 
         std::vector<Chunk> finalChunks;
-        for (auto &p : received)
-            finalChunks.push_back(p.second);
+        for (auto &p : received) finalChunks.push_back(p.second);
         std::string out = "downloaded_" + filename;
         FileChunker(1024).merge(out, finalChunks);
         if (SHA256::hashFile(out) == expectedHash)

@@ -30,6 +30,7 @@ void notifyMeta(int myPort, std::string cmd)
     addr.sin_family = AF_INET;
     addr.sin_port = htons(8001);
 
+    // Resolution logic handles Tailscale hostnames, LAN IPs, and Localhost
     struct hostent* he = gethostbyname(metaHost.c_str());
     if (he != nullptr) {
         memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
@@ -39,12 +40,14 @@ void notifyMeta(int myPort, std::string cmd)
 
     if (connect(sock, (sockaddr *)&addr, sizeof(addr)) == 0)
     {
+        SetTcpNoDelay(sock); // Ensure fast handshake
         std::string msg = cmd + " " + std::to_string(myPort);
         send(sock, msg.c_str(), (int)msg.size() + 1, 0);
     }
     
     CLOSE_SOCKET(sock);
 }
+
 // Background thread to send heartbeats every 2 seconds
 void heartbeatLoop(int myPort)
 {
@@ -181,10 +184,12 @@ int main(int argc, char *argv[])
     MKDIR("data");
     MKDIR(folder.c_str());
 
+    // Connect to MetaServer using the environment variable (Localhost/Tailscale/LAN)
     notifyMeta(port, "JOIN");
     std::thread(heartbeatLoop, port).detach();
 
     SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    // Bind to all interfaces (Allows traffic from Docker, LAN, and Tailscale)
     sockaddr_in addr = {AF_INET, htons(port), INADDR_ANY};
     bind(server_fd, (sockaddr *)&addr, sizeof(addr));
     listen(server_fd, 10);
@@ -199,12 +204,14 @@ int main(int argc, char *argv[])
     while (true)
     {
         SOCKET client = accept(server_fd, NULL, NULL);
-        SetTcpNoDelay(client);
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            taskQueue.push(client);
+        if (client != INVALID_SOCKET) {
+            SetTcpNoDelay(client);
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                taskQueue.push(client);
+            }
+            cv.notify_one();
         }
-        cv.notify_one();
     }
     CleanupSockets();
 }
