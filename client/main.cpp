@@ -26,6 +26,7 @@ struct StorageNode {
     int port;
 };
 
+// Minimal cleaner to ensure "file.txt" is the same on Windows and Linux/Docker
 void cleanString(std::string& s) {
     s.erase(std::remove(s.begin(), s.end(), '\0'), s.end());
     s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
@@ -79,7 +80,7 @@ SOCKET connectToServer(const std::string& host, int port) {
 std::string extractFileName(const std::string &path) {
     size_t pos = path.find_last_of("/\\");
     std::string fname = (pos == std::string::npos) ? path : path.substr(pos + 1);
-    cleanString(fname); 
+    cleanString(fname); // Ensure no hidden chars
     return fname;
 }
 
@@ -196,6 +197,8 @@ int main(int argc, char* argv[]) {
         if (metaSock != INVALID_SOCKET) {
             std::string req = "REGISTER " + filename + " " + std::to_string(chunks.size()) + " " + fileHash;
             sendAll(metaSock, req.c_str(), (int)req.size() + 1);
+            
+            // Wait for handshake to prevent "Unexpected EOF" in Docker
             char ack[10] = {0};
             recv(metaSock, ack, 10, 0); 
             CLOSE_SOCKET(metaSock);
@@ -214,8 +217,15 @@ int main(int argc, char* argv[]) {
                 uploadPool.enqueue([&uploadedBytes, &chunks, i, node, filename]() {
                     int retries = 1; bool success = false;
                     while (retries-- >= 0 && !success) {
-                        // Use the dynamic IP from the discovery
-                        SOCKET storSock = connectToServer(node.ip, node.port);
+                        // --- SMART ROUTING LOGIC ---
+                        // If the IP is a Docker internal bridge (172.x.x.x), 
+                        // and we are on the same laptop, use 127.0.0.1 instead.
+                        std::string targetIP = node.ip;
+                        if (targetIP.substr(0, 4) == "172.") {
+                            targetIP = "127.0.0.1";
+                        }
+
+                        SOCKET storSock = connectToServer(targetIP, node.port);
                         if (storSock == INVALID_SOCKET) continue;
                         if (sendAll(storSock, "UPLOAD", 10)) {
                             int nLen = (int)filename.size();
@@ -238,6 +248,7 @@ int main(int argc, char* argv[]) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
         uploadPool.shutdown();
+        // Force 100% display
         printProgressBar("Uploading", totalUploadSize, totalUploadSize, (totalUploadSize/1024.0/1024.0)/std::chrono::duration<double>(std::chrono::steady_clock::now()-startTime).count());
         std::cout << "\nUpload complete." << std::endl;
     }
@@ -286,8 +297,15 @@ int main(int argc, char* argv[]) {
             int tid = p.first; auto locations = p.second;
             downloadPool.enqueue([&received, &mtxMap, &downloadedBytes, tid, locations, filename]() {
                 for (auto &loc : locations) {
-                    // Connect to the specific IP provided for this chunk
-                    SOCKET sock = connectToServer(loc.first, loc.second); 
+                    // --- SMART ROUTING LOGIC ---
+                    // If the IP starts with 172., it's a local Docker bridge.
+                    // Route to localhost (127.0.0.1) for Windows host-to-container communication.
+                    std::string targetIP = loc.first;
+                    if (targetIP.substr(0, 4) == "172.") {
+                        targetIP = "127.0.0.1";
+                    }
+
+                    SOCKET sock = connectToServer(targetIP, loc.second); 
                     if (sock == INVALID_SOCKET) continue;
                     sendAll(sock, "GET_CHUNK", 10);
                     int nLen = (int)filename.size(); sendAll(sock, (char*)&nLen, sizeof(nLen));

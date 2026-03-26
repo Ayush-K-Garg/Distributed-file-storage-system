@@ -1,21 +1,20 @@
-#  Distributed High-Performance File Storage System (C++)
+# Distributed High-Performance File Storage System (C++)
 
-> A robust, self-healing, multi-threaded distributed storage system built in **C++** using **TCP sockets**.
-
-This system achieves high-speed data transfer through **parallel chunking**, **thread pooling**, **replication (RF = 2)**, and **end-to-end integrity verification (SHA-256)**. It is fully containerized using **Docker** and designed for fault tolerance, scalability, and performance.
+A robust, self-healing, multi-threaded distributed storage system built in C++ using TCP sockets. This system achieves high-speed data transfer through parallel chunking, thread pooling, replication (RF = 2), and end-to-end integrity verification (SHA-256). It is built on a Universal Multi-Node Architecture, supporting deployment across multiple physical machines and local Docker environments simultaneously.
 
 ---
 
-##  Table of Contents
+## Table of Contents
 
 - [System Architecture](#system-architecture)
 - [System Visual Flow](#system-visual-flow)
 - [Detailed Logic Flows](#detailed-logic-flows)
+- [Universal Networking and Smart Routing](#universal-networking-and-smart-routing)
 - [Key Technical Features](#key-technical-features)
-- [Scaling the Cluster](#scaling-the-cluster)
-- [Fault Tolerance & Chaos Testing](#fault-tolerance--chaos-testing)
-- [Docker Orchestration](#docker-orchestration)
 - [Compilation and Execution](#compilation-and-execution)
+- [Multi-Machine Deployment](#multi-machine-deployment)
+- [Fault Tolerance and Chaos Testing](#fault-tolerance-and-chaos-testing)
+- [Docker Orchestration](#docker-orchestration)
 - [Performance Benchmarks](#performance-benchmarks)
 - [Future Roadmap](#future-roadmap)
 - [Learning Outcomes](#learning-outcomes)
@@ -23,170 +22,99 @@ This system achieves high-speed data transfer through **parallel chunking**, **t
 
 ---
 
-##  System Architecture
+## System Architecture
 
-The system follows a **decentralized cluster architecture** with three main components:
+The system follows a decentralized cluster architecture with three main components.
 
-### 1.  Client Orchestrator
-- Central interface for all file operations
-- Splits files into optimized chunks (**1MB / 4MB**)
-- Generates **SHA-256** hash for integrity
-- Uses **ThreadPool (8 threads)** for parallel I/O
+### Client Orchestrator (Universal Client)
 
-### 2.  Metadata Registry (MetaServer)
-- Runs on **Port `8001`**
-- Maintains:
-  - Node heartbeats
-  - Chunk-to-node mapping
-- Stores persistent state in: `data/registry.db`
+- Central interface for all file operations, supporting both absolute and relative paths.
+- Splits files into optimized chunks (1 MB / 4 MB).
+- **Smart Routing:** Automatically detects whether a node is local, Docker-based, or remote.
+- Uses a `ThreadPool` (8 threads) for parallel I/O.
 
-### 3.  Storage Node Workers
-- Independent processes
-- Handle binary disk I/O
-- Use **heartbeat mechanism** to report health
-- Store chunks as raw binary files
+### Metadata Registry (MetaServer)
 
----
+- Runs on **Port 8001**.
+- Tracks dynamic `IP:Port` pairs for all joining nodes.
+- Maintains persistent chunk-to-node mapping in `data/registry.db`.
 
-##  System Visual Flow
+### Storage Node Workers
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                 CLIENT ORCHESTRATOR                     │
-│  (File Splitter | ThreadPool | Parallel I/O | UI)       │
-└──────────────┬───────────────────────────────▲──────────┘
-               │                               │
-      1. REGISTER/GET_NODES            2. LIVE NODE LIST
-               │                               │
-┌──────────────▼───────────────────────────────┴──────────┐
-│                METADATA SERVER (Port 8001)              │
-│     (Node Registry | Heartbeat | registry.db)           │
-└──────────────▲───────────────────────────────▲──────────┘
-               │                               │
-        4. JOIN/HEARTBEAT                4. JOIN/HEARTBEAT
-               │                               │
-┌──────────────┴──────────┐       ┌──────────────┴──────────┐
-│   STORAGE NODE (9001)   │       │   STORAGE NODE (9002)   │
-│ (Chunk A-1 | Chunk B-2) │       │ (Chunk A-2 | Chunk B-1) │
-└──────────────▲──────────┘       └──────────────▲──────────┘
-               │                               │
-               └───────────────┬───────────────┘
-                               │
-               3. REPLICATED DATA TRANSFER (RF=2)
-                         (Parallel TCP)
-```
+- Independent processes (native or Dockerized).
+- Utilize high-capacity secondary storage via volume mapping.
+- Use a heartbeat mechanism to report health and current network IP.
 
 ---
 
-## 🔍 Detailed Logic Flows
+## System Visual Flow
 
-###  Upload Flow (`PUT`)
+```
++----------------------------------------------------------+
+|              UNIVERSAL CLIENT ORCHESTRATOR               |
+|      (Smart Routing | ThreadPool | Parallel I/O)         |
++---------------+---------------+--------------+-----------+
+                |               |              |
+      1. REGISTER/GET_NODES     |       2. DYNAMIC IP LIST
+                |               |       (e.g., 192.168.1.15:9001)
++---------------v---------------+--------------v-----------+
+|                 METADATA SERVER (Port 8001)              |
+|       (IP-Aware Registry | Heartbeat | registry.db)      |
++---------------^-------------------------------^-----------+
+                |                               |
+       4. JOIN (127.0.0.1)             4. JOIN (192.168.1.20)
+                |                               |
++---------------+-----------+     +-------------+-----------+
+|   LOCAL NODE (9001)       |     |   REMOTE NODE (9005)    |
+|   (Host Machine SSD)      |     |   (Spare Laptop 1TB)    |
++---------------^-----------+     +-------------^-----------+
+                |                               |
+                +---------------+---------------+
+                                |
+                3. REPLICATED DATA TRANSFER (RF=2)
+                     (Parallel TCP over Wi-Fi/LAN)
+```
+
+---
+
+## Detailed Logic Flows
+
+### Upload Flow
 
 | Step | Action | Detail |
 |------|--------|--------|
-| 1 | **File Chunking** | Split file into segments (1MB / 4MB) |
-| 2 | **Hash Generation** | Compute SHA-256 of entire file |
-| 3 | **Metadata Registration** | `REGISTER <filename> <chunkCount> <hash>` |
-| 4 | **Node Allocation** | Round-robin selection, assign **2 nodes per chunk** (RF = 2) |
-| 5 | **Parallel Transfer** | ThreadPool executes concurrent uploads |
-| 6 | **Acknowledgment** | MetaServer responds `"OK"` after persistence |
-
-###  Download Flow (`GET`)
-
-| Step | Action | Detail |
-|------|--------|--------|
-| 1 | **Request** | `GET <filename>` |
-| 2 | **Metadata Lookup** | Retrieve chunk map + hash |
-| 3 | **Node Filtering** | Remove inactive nodes (heartbeat timeout) |
-| 4 | **Parallel Retrieval** | Fetch chunks concurrently |
-| 5 | **Fallback** | Switch to replica if primary node is down |
-| 6 | **Reconstruction** | Merge chunks sequentially |
-| 7 | **Integrity Verification** | Compare SHA-256 hashes |
+| 1 | File Chunking | Split file into segments (1 MB / 4 MB) |
+| 2 | Hash Generation | Compute SHA-256 of entire file |
+| 3 | Metadata Registration | `REGISTER <filename> <chunkCount> <hash>` |
+| 4 | Node Allocation | Round-robin selection across all detected IPs |
+| 5 | Parallel Transfer | ThreadPool executes concurrent uploads to multiple nodes |
 
 ---
 
-##  Key Technical Features
+## Universal Networking and Smart Routing
 
-###  Parallel Transfer Engine
-- Custom **ThreadPool (8 threads)**
-- Multi-stream **TCP transfers**
-- Achieves **~1.1 GB/s** (local environment)
+The system is designed to handle three distinct network environments simultaneously.
 
-###  End-to-End Data Integrity
-- **SHA-256** verification at:
-  - Upload
-  - Storage
-  - Download
-
-###  Metadata Journaling
-- Persistent storage in `data/registry.db`
-- Enables **full recovery** after restart
+- **Local Native:** Nodes running in standard terminals (`127.0.0.1`).
+- **Local Docker:** Nodes running in Docker on the same machine. The client automatically routes internal bridge IPs (`172.18.x.x`) to `127.0.0.1` to traverse the Docker NAT via mapped ports.
+- **Remote Hardware:** Nodes running on a separate machine over Wi-Fi (`192.168.x.x`). The client connects directly to the remote LAN IP.
 
 ---
 
-##  Scaling the Cluster
+## Key Technical Features
 
-To add a new node, append it to your `docker-compose.yml`:
+### Parallel Transfer Engine
 
-```yaml
-node3:
-  build:
-    context: .
-    dockerfile: storage_node/Dockerfile
-  environment:
-    - META_HOST=meta-server
-  ports:
-    - "9003:9003"
-  command: ["./node_app", "9003", "data/node3"]
-  volumes:
-    - ./data/node3:/usr/src/app/data/node3
-```
-
-Then apply the changes:
-
-```bash
-docker-compose up -d --build
-```
+- Custom `ThreadPool` with 8 threads.
+- Multi-stream TCP transfers achieving approximately **1.1 GB/s** (local).
+- **End-to-End Integrity:** SHA-256 verification ensures data consistency across remote nodes.
+- **Metadata Journaling:** Persistent state saved in `data/registry.db`.
 
 ---
 
-##  Fault Tolerance & Chaos Testing
+## Compilation and Execution
 
-###  Node Failure Test
-```bash
-docker-compose stop node1
-```
->  System automatically retrieves data from the **replica node**.
-
-###  Metadata Server Failure
-```bash
-docker-compose stop meta-server
-```
->  Client operations fail — **Single Point of Failure confirmed** (known limitation).
-
-###  Persistence Test
-```bash
-docker-compose down
-docker-compose up
-```
->  Data fully restored from `registry.db`.
-
----
-
-##  Docker Orchestration
-
-| Action | Command |
-|--------|---------|
-| **Start Cluster** | `docker-compose up --build` |
-                        or `docker-compose up`
-| **Stop Cluster** | `docker-compose down` |
-| **View Logs** | `docker-compose logs -f meta-server` |
-
----
-
-##  Compilation and Execution
-
-### Compilation
+### Compilation (Windows / MinGW)
 
 **Metadata Server**
 ```bash
@@ -200,98 +128,99 @@ g++ storage_node/StorageServer.cpp -o node_app -lws2_32
 
 **Client**
 ```bash
-g++ client/main.cpp common/services/FileChunker.cpp  common/models/Chunk.cpp  -o client_app -lws2_32
+g++ client/main.cpp common/services/FileChunker.cpp common/models/Chunk.cpp -o client_app -lws2_32
 ```
 
-### Execution
+### Execution (Native Terminal)
 
-**Using Docker (Recommended)**
-```bash
-docker-compose up --build
-```
-
-**Client Commands**
-# Run meta server in 1 terminal
+**Run Meta Server — Terminal 1**
+```powershell
 .\meta
+```
 
-# Run nodes like:
-.\node 9001 data/node1
+**Run Storage Nodes — Terminal 2 and 3**
+```powershell
+# Format: .\node_app <PORT> <DATA_DIRECTORY>
+.\node_app 9001 data/node1
+.\node_app 9002 data/node2
+```
 
-.\node 9002 data/node2
+### Client Commands
+
+The client is location-agnostic. Files can be uploaded from any path, but downloaded using only the registered filename.
 
 ```bash
-# 1. Upload from the project's samples folder (Relative Path)
+# Upload from the project's samples folder (relative path)
 ./client_app upload samples/video.mp4
 
-# 2. Upload from a different drive/folder (Absolute Path)
-# Use quotes if the path contains spaces
+# Upload from a different drive or folder (absolute path)
 ./client_app upload "D:/Videos/vacation_vlog.mp4"
 
-# 3. Upload a document from your system
-./client_app upload "C:/Users/Ayush/Documents/Resume.pdf"
+# Upload a document from the system
+./client_app upload "C:/Users/Username/Documents/Resume.pdf"
 
-# Download a file
-# When downloading, you do not need the original path. You only need the filename as it was registered.
-
+# Download a file (no path needed, just the registered filename)
 ./client_app download video.mp4
 
-
-# Sync (Verification)
+# Sync: full upload, download, and SHA-256 binary match check
 ./client_app sync samples/video.mp4
 ```
 
 ---
 
-##  Performance Benchmarks
+## Multi-Machine Deployment
+
+To scale the cluster to a second machine (e.g., using a 1 TB spare drive):
+
+1. **Networking:** Ensure both machines are on the same Wi-Fi network.
+2. **Meta IP:** Identify the host machine's local IP (e.g., `192.168.1.15`).
+3. **Deploy on spare machine:** Update the `docker-compose.yml` on the spare machine:
+
+```yaml
+environment:
+  - META_HOST=192.168.1.15  # IP of the host machine
+volumes:
+  - D:/CloudVault:/usr/src/app/data/vault  # Mapping to 1TB drive
+```
+
+4. **Run:** Execute `docker-compose up --build` on the spare machine.
+
+---
+
+## Fault Tolerance and Chaos Testing
+
+| Scenario | Command | Expected Behavior |
+|----------|---------|-------------------|
+| Node Failure | `docker-compose stop node1` | Data retrieved from replica |
+| Persistence | `docker-compose down` then `up` | Data restored via `registry.db` |
+
+---
+
+## Docker Orchestration
+
+| Action | Command |
+|--------|---------|
+| Start Cluster | `docker-compose up --build` |
+| Stop Cluster | `docker-compose down` |
+| View Logs | `docker-compose logs -f meta-server` |
+
+---
+
+## Performance Benchmarks
 
 | Metric | Value |
 |--------|-------|
-| **Transfer Speed** | ~1.1 GB/s |
-| **Thread Pool Size** | 8 threads |
-| **Replication Factor** | 2 |
-| **Chunk Size** | 1MB / 4MB |
+| Local Transfer Speed | ~1.1 GB/s |
+| Replication Factor | 2 |
+| Thread Pool Size | 8 threads |
+| Chunk Size | 1 MB / 4 MB |
 
 ---
 
-##  Future Roadmap
-
-- [ ] Smart load balancing (CPU + disk aware)
-- [ ] Client-side **AES-256** encryption
-- [ ] Flutter dashboard for live monitoring
-- [ ] Distributed geo-replication
-- [ ] Adaptive chunk sizing
-
----
-
-##  Learning Outcomes
-
-- Distributed systems design
-- Fault tolerance and replication
-- Socket programming (**Winsock2**)
-- Multithreading and concurrency
-- Docker and containerization
-- Data integrity and hashing
-
----
-
-##  Author
+## Author
 
 **Ayush Krishna Garg**
-*National Institute of Technology (NIT), Jamshedpur*
-*B.Tech — Electronics and Communication Engineering*
+National Institute of Technology (NIT), Jamshedpur
+B.Tech — Electronics and Communication Engineering
 
-**Focus Areas:**
-- High-performance C++ systems
-- Distributed architecture
-- Network programming
-
----
-
-##  Final Notes
-
-This project demonstrates a **production-grade distributed storage system** with:
-
--  High performance
--  Strong consistency
--  Fault tolerance
--  Scalability
+This project represents a production-ready private cloud architecture, capable of turning spare hardware into a unified, high-performance storage pool.
