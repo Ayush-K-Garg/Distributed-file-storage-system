@@ -178,6 +178,7 @@ docker-compose up
 | Action | Command |
 |--------|---------|
 | **Start Cluster** | `docker-compose up --build` |
+                        or `docker-compose up`
 | **Stop Cluster** | `docker-compose down` |
 | **View Logs** | `docker-compose logs -f meta-server` |
 
@@ -215,11 +216,21 @@ docker-compose up --build
 **Client Commands**
 
 ```bash
-# Upload a file
+# 1. Upload from the project's samples folder (Relative Path)
 ./client_app upload samples/video.mp4
 
+# 2. Upload from a different drive/folder (Absolute Path)
+# Use quotes if the path contains spaces
+./client_app upload "D:/Videos/vacation_vlog.mp4"
+
+# 3. Upload a document from your system
+./client_app upload "C:/Users/Ayush/Documents/Resume.pdf"
+
 # Download a file
+# When downloading, you do not need the original path. You only need the filename as it was registered.
+
 ./client_app download video.mp4
+
 
 # Sync (Verification)
 ./client_app sync samples/video.mp4
