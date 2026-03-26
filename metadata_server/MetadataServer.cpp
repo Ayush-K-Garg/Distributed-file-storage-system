@@ -127,6 +127,9 @@ int main() {
         
         if (client == INVALID_SOCKET) continue;
 
+        SetTcpNoDelay(client);
+
+
         // CAPTURE SENDER IP (Detects if it's localhost or the spare laptop)
         std::string senderIP = inet_ntoa(client_addr.sin_addr);
 

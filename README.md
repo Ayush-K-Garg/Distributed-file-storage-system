@@ -10,13 +10,13 @@ A robust, self-healing, multi-threaded distributed storage system built in C++ u
 - [System Visual Flow](#system-visual-flow)
 - [Detailed Logic Flows](#detailed-logic-flows)
 - [Universal Networking and Smart Routing](#universal-networking-and-smart-routing)
+- [Performance and Hardware Optimizations](#performance-and-hardware-optimizations)
 - [Key Technical Features](#key-technical-features)
 - [Compilation and Execution](#compilation-and-execution)
 - [Multi-Machine Deployment](#multi-machine-deployment)
 - [Fault Tolerance and Chaos Testing](#fault-tolerance-and-chaos-testing)
 - [Docker Orchestration](#docker-orchestration)
 - [Performance Benchmarks](#performance-benchmarks)
-- [Future Roadmap](#future-roadmap)
 - [Learning Outcomes](#learning-outcomes)
 - [Author](#author)
 
@@ -29,21 +29,21 @@ The system follows a decentralized cluster architecture with three main componen
 ### Client Orchestrator (Universal Client)
 
 - Central interface for all file operations, supporting both absolute and relative paths.
-- Splits files into optimized chunks (1 MB / 4 MB).
+- **Adaptive Chunking:** Dynamically scales chunk sizes from 1 MB up to 128 MB based on file size to optimize HDD throughput.
 - **Smart Routing:** Automatically detects whether a node is local, Docker-based, or remote.
 - Uses a `ThreadPool` (8 threads) for parallel I/O.
 
 ### Metadata Registry (MetaServer)
 
 - Runs on **Port 8001**.
-- Tracks dynamic `IP:Port` pairs for all joining nodes.
+- **IP-Aware Discovery:** Tracks dynamic `IP:Port` pairs for all joining nodes (Localhost, Docker Bridge, or LAN).
 - Maintains persistent chunk-to-node mapping in `data/registry.db`.
 
 ### Storage Node Workers
 
 - Independent processes (native or Dockerized).
-- Utilize high-capacity secondary storage via volume mapping.
-- Use a heartbeat mechanism to report health and current network IP.
+- **High-Capacity Storage:** Designed to utilize secondary drives (e.g., 1 TB HDDs) via volume mapping.
+- **Heartbeat Mechanism:** Reports health and current network IP to the MetaServer every 2 seconds.
 
 ---
 
@@ -51,7 +51,7 @@ The system follows a decentralized cluster architecture with three main componen
 
 ```
 +----------------------------------------------------------+
-|              UNIVERSAL CLIENT ORCHESTRATOR               |
+|               UNIVERSAL CLIENT ORCHESTRATOR              |
 |      (Smart Routing | ThreadPool | Parallel I/O)         |
 +---------------+---------------+--------------+-----------+
                 |               |              |
@@ -62,11 +62,11 @@ The system follows a decentralized cluster architecture with three main componen
 |       (IP-Aware Registry | Heartbeat | registry.db)      |
 +---------------^-------------------------------^-----------+
                 |                               |
-       4. JOIN (127.0.0.1)             4. JOIN (192.168.1.20)
+       4. JOIN (127.0.0.1)              4. JOIN (192.168.1.19)
                 |                               |
 +---------------+-----------+     +-------------+-----------+
 |   LOCAL NODE (9001)       |     |   REMOTE NODE (9005)    |
-|   (Host Machine SSD)      |     |   (Spare Laptop 1TB)    |
+|   (Host Machine SSD)      |     |   (Server Machine 1TB)  |
 +---------------^-----------+     +-------------^-----------+
                 |                               |
                 +---------------+---------------+
@@ -81,23 +81,52 @@ The system follows a decentralized cluster architecture with three main componen
 
 ### Upload Flow
 
-| Step | Action | Detail |
-|------|--------|--------|
-| 1 | File Chunking | Split file into segments (1 MB / 4 MB) |
-| 2 | Hash Generation | Compute SHA-256 of entire file |
-| 3 | Metadata Registration | `REGISTER <filename> <chunkCount> <hash>` |
-| 4 | Node Allocation | Round-robin selection across all detected IPs |
-| 5 | Parallel Transfer | ThreadPool executes concurrent uploads to multiple nodes |
+1. **Adaptive Chunking:** The client calculates the optimal chunk size based on total file size.
+2. **Hash Generation:** Computes SHA-256 of the entire file for end-to-end verification.
+3. **Metadata Registration:** Sends `REGISTER <filename> <chunkCount> <hash>` to the MetaServer.
+4. **Node Allocation:** MetaServer performs round-robin selection across all detected IPs.
+5. **Parallel Transfer:** ThreadPool executes concurrent uploads to multiple physical nodes.
+
+### Download Flow
+
+1. **Metadata Lookup:** Client sends `GET <filename>` to MetaServer and receives the chunk-to-node map.
+2. **Parallel Retrieval:** ThreadPool fetches all chunks concurrently from their respective nodes.
+3. **Integrity Verification:** Reassembled file is SHA-256 hashed and compared against the registered hash.
+4. **File Reconstruction:** Verified chunks are written to disk in the correct order.
 
 ---
 
 ## Universal Networking and Smart Routing
 
-The system is designed to handle three distinct network environments simultaneously.
+The system handles three distinct network environments simultaneously.
 
-- **Local Native:** Nodes running in standard terminals (`127.0.0.1`).
-- **Local Docker:** Nodes running in Docker on the same machine. The client automatically routes internal bridge IPs (`172.18.x.x`) to `127.0.0.1` to traverse the Docker NAT via mapped ports.
-- **Remote Hardware:** Nodes running on a separate machine over Wi-Fi (`192.168.x.x`). The client connects directly to the remote LAN IP.
+- **Local Native:** Nodes running in standard terminals on the host machine (`127.0.0.1`).
+- **Local Docker:** Nodes running in Docker on the host machine. The client automatically routes internal bridge IPs (`172.18.x.x`) to `127.0.0.1` to traverse the Docker NAT via mapped ports.
+- **Remote Hardware:** Nodes running on a separate server machine over Wi-Fi (`192.168.x.x`). The client connects directly to the remote LAN IP.
+
+---
+
+## Performance and Hardware Optimizations
+
+### Low-Latency Networking (TCP_NODELAY)
+
+To prevent transfer stalls and stuttering during large file operations, the system disables Nagle's Algorithm on all sockets.
+
+- **Implementation:** `setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, ...)` is called on every socket at initialization.
+- **Advantage:** Small control messages (`JOIN`, `HEARTBEAT`) and the tail end of file chunks are transmitted immediately without waiting for buffer saturation, eliminating the stall observed at high transfer completion percentages during large transfers.
+
+### Adaptive Chunking (HDD Optimization)
+
+For a 1 TB mechanical HDD, writing thousands of small files causes disk thrashing and significantly degrades throughput. The system dynamically scales chunk size based on total file size to promote sequential write patterns.
+
+| File Size | Chunk Size |
+|-----------|------------|
+| Less than 10 MB | 1 MB |
+| Less than 500 MB | 4 MB |
+| Less than 1 GB | 16 MB |
+| Greater than 50 GB | 128 MB |
+
+- **Advantage:** Larger chunks promote sequential write operations on the mechanical drive, significantly increasing transfer speeds and reducing disk wear over time.
 
 ---
 
@@ -105,10 +134,11 @@ The system is designed to handle three distinct network environments simultaneou
 
 ### Parallel Transfer Engine
 
-- Custom `ThreadPool` with 8 threads.
-- Multi-stream TCP transfers achieving approximately **1.1 GB/s** (local).
-- **End-to-End Integrity:** SHA-256 verification ensures data consistency across remote nodes.
-- **Metadata Journaling:** Persistent state saved in `data/registry.db`.
+- Custom `ThreadPool` with 8 threads for concurrent multi-stream TCP transfers.
+- Local transfer speeds of approximately **1.1 GB/s**.
+- **End-to-End Integrity:** SHA-256 verification ensures data consistency across all nodes, including remote ones.
+- **Metadata Journaling:** Persistent cluster state saved in `data/registry.db`, surviving full restarts.
+- **Replication Factor (RF = 2):** Every chunk is written to two independent nodes, ensuring data availability during single-node failures.
 
 ---
 
@@ -131,36 +161,59 @@ g++ storage_node/StorageServer.cpp -o node_app -lws2_32
 g++ client/main.cpp common/services/FileChunker.cpp common/models/Chunk.cpp -o client_app -lws2_32
 ```
 
+---
+
 ### Execution (Native Terminal)
 
-**Run Meta Server — Terminal 1**
+**Step 1 — Run Meta Server (Terminal 1)**
 ```powershell
 .\meta
 ```
 
-**Run Storage Nodes — Terminal 2 and 3**
+**Step 2 — Run Storage Nodes (Terminal 2 and Terminal 3)**
 ```powershell
 # Format: .\node_app <PORT> <DATA_DIRECTORY>
 .\node_app 9001 data/node1
 .\node_app 9002 data/node2
 ```
 
+---
+
+### Execution (Docker Orchestration)
+
+**Start the full cluster**
+```bash
+docker-compose up --build
+```
+
+**Stop the cluster**
+```bash
+docker-compose down
+```
+
+**View live logs**
+```bash
+docker-compose logs -f meta-server
+```
+
+---
+
 ### Client Commands
 
-The client is location-agnostic. Files can be uploaded from any path, but downloaded using only the registered filename.
+The client is location-agnostic. Files can be uploaded from any path on the system but must be downloaded using only the registered filename.
 
 ```bash
-# Upload from the project's samples folder (relative path)
+# Upload using a relative path
 ./client_app upload samples/video.mp4
 
-# Upload from a different drive or folder (absolute path)
-./client_app upload "D:/Videos/vacation_vlog.mp4"
+# Upload using an absolute path
+./client_app upload "D:/Videos/aws.mp4"
 
 # Upload a document from the system
 ./client_app upload "C:/Users/Username/Documents/Resume.pdf"
 
-# Download a file (no path needed, just the registered filename)
-./client_app download video.mp4
+# Download a file (filename only — no path required)
+./client_app download aws.mp4
 
 # Sync: full upload, download, and SHA-256 binary match check
 ./client_app sync samples/video.mp4
@@ -170,20 +223,36 @@ The client is location-agnostic. Files can be uploaded from any path, but downlo
 
 ## Multi-Machine Deployment
 
-To scale the cluster to a second machine (e.g., using a 1 TB spare drive):
+To use a server machine as a dedicated 1 TB storage vault, follow the steps below.
 
-1. **Networking:** Ensure both machines are on the same Wi-Fi network.
-2. **Meta IP:** Identify the host machine's local IP (e.g., `192.168.1.15`).
-3. **Deploy on spare machine:** Update the `docker-compose.yml` on the spare machine:
+### Prerequisites
+
+1. Ensure both the host machine and the server machine are connected to the same Wi-Fi network.
+2. Identify the host machine's local IP address (e.g., `192.168.1.15`).
+3. Create the storage directory `D:/CloudVault` on the server machine.
+
+### Server Machine — `docker-compose.yml` Configuration
 
 ```yaml
-environment:
-  - META_HOST=192.168.1.15  # IP of the host machine
-volumes:
-  - D:/CloudVault:/usr/src/app/data/vault  # Mapping to 1TB drive
+services:
+  node1:
+    build: .
+    environment:
+      - META_HOST=192.168.1.15  # IP address of the host machine
+    ports:
+      - "9005:9005"
+    command: ["./node_app", "9005", "data/node1"]
+    volumes:
+      - D:/CloudVault/node1:/usr/src/app/data/node1
 ```
 
-4. **Run:** Execute `docker-compose up --build` on the spare machine.
+### Deploy on Server Machine
+
+```bash
+docker-compose up --build
+```
+
+Once running, the server node automatically joins the cluster by registering with the MetaServer on the host machine. No changes are required on the host side.
 
 ---
 
@@ -191,18 +260,9 @@ volumes:
 
 | Scenario | Command | Expected Behavior |
 |----------|---------|-------------------|
-| Node Failure | `docker-compose stop node1` | Data retrieved from replica |
-| Persistence | `docker-compose down` then `up` | Data restored via `registry.db` |
-
----
-
-## Docker Orchestration
-
-| Action | Command |
-|--------|---------|
-| Start Cluster | `docker-compose up --build` |
-| Stop Cluster | `docker-compose down` |
-| View Logs | `docker-compose logs -f meta-server` |
+| Node Failure | `docker-compose stop node1` | Data is retrieved from the replica node on the server machine |
+| Cluster Restart | `docker-compose down` then `docker-compose up` | Registry is loaded from `registry.db`; all nodes rejoin automatically |
+| Network Partition | Disconnect server machine from Wi-Fi | Host-local nodes continue serving data; server node re-registers on reconnect |
 
 ---
 
@@ -213,7 +273,20 @@ volumes:
 | Local Transfer Speed | ~1.1 GB/s |
 | Replication Factor | 2 |
 | Thread Pool Size | 8 threads |
-| Chunk Size | 1 MB / 4 MB |
+| Chunk Size (Adaptive) | 1 MB to 128 MB (dynamic) |
+| Heartbeat Interval | 2 seconds |
+| MetaServer Port | 8001 |
+
+---
+
+## Learning Outcomes
+
+- Designed and implemented a distributed system from scratch using raw TCP sockets in C++.
+- Applied multi-threading via a custom `ThreadPool` to achieve true parallel I/O across physical hardware.
+- Handled heterogeneous network environments (localhost, Docker NAT, LAN) within a single smart routing layer.
+- Implemented end-to-end data integrity using SHA-256 checksums across replicated nodes.
+- Optimized for real-world hardware constraints including mechanical HDD sequential write performance via adaptive chunking.
+- Gained practical experience with Docker volume mapping and container networking for storage workloads.
 
 ---
 
@@ -223,4 +296,4 @@ volumes:
 National Institute of Technology (NIT), Jamshedpur
 B.Tech — Electronics and Communication Engineering
 
-This project represents a production-ready private cloud architecture, capable of turning spare hardware into a unified, high-performance storage pool.
+This project demonstrates a production-ready private cloud architecture, optimized for real-world networking constraints and heterogeneous hardware environments.

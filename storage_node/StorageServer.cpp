@@ -199,6 +199,7 @@ int main(int argc, char *argv[])
     while (true)
     {
         SOCKET client = accept(server_fd, NULL, NULL);
+        SetTcpNoDelay(client);
         {
             std::lock_guard<std::mutex> lock(mtx);
             taskQueue.push(client);
