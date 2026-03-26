@@ -200,10 +200,7 @@ g++ storage_node/StorageServer.cpp -o node_app -lws2_32
 
 **Client**
 ```bash
-g++ client/main.cpp \
-  common/services/FileChunker.cpp \
-  common/models/Chunk.cpp \
-  -o client_app -lws2_32
+g++ client/main.cpp common/services/FileChunker.cpp  common/models/Chunk.cpp  -o client_app -lws2_32
 ```
 
 ### Execution
@@ -214,6 +211,13 @@ docker-compose up --build
 ```
 
 **Client Commands**
+# Run meta server in 1 terminal
+.\meta
+
+# Run nodes like:
+.\node 9001 data/node1
+
+.\node 9002 data/node2
 
 ```bash
 # 1. Upload from the project's samples folder (Relative Path)

@@ -8,16 +8,25 @@
 #include <chrono>
 #include <ctime>
 #include <sstream>
-#include <algorithm> // Required for string cleaning
+#include <algorithm>
 #include "../common/utils/SocketWrapper.h" 
+
+// --- DATA STRUCTURES ---
 
 struct FileEntry {
     std::string hash;
+    // ChunkID -> List of Ports
     std::vector<std::pair<int, std::vector<int>>> chunks;
 };
 
+struct NodeInfo {
+    std::string ip;
+    std::time_t last_seen;
+};
+
 std::unordered_map<std::string, FileEntry> metadata;
-std::unordered_map<int, std::time_t> liveNodes;
+// Port -> {IP Address, Last Heartbeat Timestamp}
+std::unordered_map<int, NodeInfo> liveNodes; 
 std::mutex globalMtx; 
 
 // --- UTILS ---
@@ -28,9 +37,8 @@ void cleanString(std::string& s) {
     s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
 }
 
-// Updated path to use the Docker Volume for persistence
 void saveToRegistry(std::string filename, std::string hash, int numChunks, const std::vector<std::pair<int, std::vector<int>>>& chunks) {
-    MKDIR("data"); // Ensure folder exists
+    MKDIR("data"); 
     std::ofstream db("data/registry.db", std::ios::app); 
     db << "FILE " << filename << " " << hash << " " << numChunks << "\n";
     for (auto const& p : chunks) {
@@ -85,28 +93,43 @@ void nodeJanitor() {
         std::lock_guard<std::mutex> lock(globalMtx);
         std::time_t now = std::time(nullptr);
         for (auto it = liveNodes.begin(); it != liveNodes.end(); ) {
-            if (std::difftime(now, it->second) > 6.0) {
-                std::cout << "--- Node " << it->first << " disconnected ---" << std::endl;
+            if (std::difftime(now, it->second.last_seen) > 6.0) {
+                std::cout << "--- Node " << it->second.ip << ":" << it->first << " disconnected ---" << std::endl;
                 it = liveNodes.erase(it);
             } else ++it;
         }
     }
 }
 
+// --- MAIN SERVER LOGIC ---
+
 int main() {
     if (!InitializeSockets()) return 1;
 
     SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr = { AF_INET, htons(8001), INADDR_ANY };
-    bind(server_fd, (sockaddr*)&addr, sizeof(addr));
+    
+    if (bind(server_fd, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+        std::cerr << "Bind failed!" << std::endl;
+        return 1;
+    }
+    
     listen(server_fd, 10);
-
     loadRegistry();
     std::thread(nodeJanitor).detach();
-    std::cout << "Metadata Server running on port 8001" << std::endl;
+    
+    std::cout << "Universal Metadata Server running on port 8001..." << std::endl;
 
     while (true) {
-        SOCKET client = accept(server_fd, NULL, NULL);
+        sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        SOCKET client = accept(server_fd, (sockaddr*)&client_addr, &addr_len);
+        
+        if (client == INVALID_SOCKET) continue;
+
+        // CAPTURE SENDER IP (Detects if it's localhost or the spare laptop)
+        std::string senderIP = inet_ntoa(client_addr.sin_addr);
+
         char buffer[1024] = {0};
         int bytes = recv(client, buffer, sizeof(buffer) - 1, 0);
         if (bytes <= 0) { CLOSE_SOCKET(client); continue; }
@@ -118,19 +141,26 @@ int main() {
         if (command == "JOIN" || command == "HEARTBEAT") {
             int port; ss >> port;
             std::lock_guard<std::mutex> lock(globalMtx);
-            liveNodes[port] = std::time(nullptr);
-            if (command == "JOIN") std::cout << "+++ Node " << port << " joined +++" << std::endl;
+            
+            // Store the real IP detected from the socket
+            liveNodes[port] = {senderIP, std::time(nullptr)};
+            
+            if (command == "JOIN") {
+                std::cout << "+++ Node " << senderIP << ":" << port << " joined +++" << std::endl;
+            }
         }
         else if (command == "GET_LIVE_NODES") {
             std::lock_guard<std::mutex> lock(globalMtx);
             std::string resp = "";
-            for (auto const& [port, _] : liveNodes) resp += std::to_string(port) + " ";
+            for (auto const& [port, info] : liveNodes) {
+                resp += info.ip + ":" + std::to_string(port) + " ";
+            }
             send(client, resp.c_str(), (int)resp.size() + 1, 0);
         }
         else if (command == "REGISTER") {
             std::string filename, fileHash; int numChunks;
             ss >> filename >> numChunks >> fileHash; 
-            cleanString(filename); // CLEAN FILENAME
+            cleanString(filename);
 
             std::lock_guard<std::mutex> lock(globalMtx);
             std::vector<int> currentPorts;
@@ -140,44 +170,62 @@ int main() {
                 std::vector<std::pair<int, std::vector<int>>> chunks;
                 for (int i = 0; i < numChunks; i++) {
                     std::vector<int> replicas;
+                    // Round-robin distribution
                     replicas.push_back(currentPorts[i % currentPorts.size()]);
-                    if (currentPorts.size() > 1) replicas.push_back(currentPorts[(i + 1) % currentPorts.size()]);
+                    if (currentPorts.size() > 1) {
+                        replicas.push_back(currentPorts[(i + 1) % currentPorts.size()]);
+                    }
                     chunks.push_back({i, replicas});
                 }
                 metadata[filename] = {fileHash, chunks};
                 saveToRegistry(filename, fileHash, numChunks, chunks);
-                std::cout << "Registered: " << filename << " (RF=2)" << std::endl;
+                std::cout << "Registered: " << filename << " (Replicated on " << currentPorts.size() << " nodes)" << std::endl;
             }
             
-            // HANDSHAKE: Send OK to client so it knows we are finished
+            // Handshake confirmation
             std::string ok = "OK";
             send(client, ok.c_str(), (int)ok.size() + 1, 0);
         }
         else if (command == "GET") {
             std::string filename; ss >> filename;
-            cleanString(filename); // CLEAN FILENAME
+            cleanString(filename); 
             std::lock_guard<std::mutex> lock(globalMtx);
             
             if (metadata.find(filename) == metadata.end()) {
-                int end = -1; sendAll(client, (char*)&end, sizeof(end));
+                int end = -1; 
+                sendAll(client, (char*)&end, sizeof(end));
             } else {
+                // 1. Send File Hash
                 std::string h = metadata[filename].hash;
                 int hLen = (int)h.size();
                 sendAll(client, (char*)&hLen, sizeof(hLen));
                 sendAll(client, h.c_str(), hLen);
 
+                // 2. Send Chunk Map with Dynamic IPs
                 for (auto &p : metadata[filename].chunks) {
                     int id = p.first;
                     std::vector<int> filteredPorts;
                     for (int port : p.second) {
-                        if (liveNodes.find(port) != liveNodes.end()) filteredPorts.push_back(port);
+                        if (liveNodes.find(port) != liveNodes.end()) {
+                            filteredPorts.push_back(port);
+                        }
                     }
+                    
                     int count = (int)filteredPorts.size();
                     sendAll(client, (char*)&id, sizeof(id));
                     sendAll(client, (char*)&count, sizeof(count));
-                    for (int port : filteredPorts) sendAll(client, (char*)&port, sizeof(port));
+
+                    for (int port : filteredPorts) {
+                        // Protocol: Send [IP length] -> [IP string] -> [Port]
+                        std::string nodeIP = liveNodes[port].ip;
+                        int ipLen = (int)nodeIP.size();
+                        sendAll(client, (char*)&ipLen, sizeof(ipLen));
+                        sendAll(client, nodeIP.c_str(), ipLen);
+                        sendAll(client, (char*)&port, sizeof(port));
+                    }
                 }
-                int end = -1; sendAll(client, (char*)&end, sizeof(end));
+                int end = -1; 
+                sendAll(client, (char*)&end, sizeof(end));
             }
         }
         CLOSE_SOCKET(client);
