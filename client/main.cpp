@@ -217,6 +217,17 @@ int main(int argc, char *argv[])
         CLOSE_SOCKET(liveSock);
     }
 
+    bool hasRemoteNodes = false;
+    for (const auto &n : liveNodes)
+    {
+        if (n.ip.substr(0, 3) != "127")
+        {
+            hasRemoteNodes = true;
+            break;
+        }
+    }
+    int optimalThreads = hasRemoteNodes ? 2 : 8;
+
     if (mode == "upload" || mode == "sync")
     {
         if (liveNodes.empty())
@@ -276,7 +287,7 @@ int main(int argc, char *argv[])
 
         std::atomic<long long> uploadedBytes(0);
         auto startTime = std::chrono::steady_clock::now();
-        ThreadPool uploadPool(8);
+        ThreadPool uploadPool(optimalThreads);
 
         for (size_t i = 0; i < chunks.size(); i++)
         {
@@ -322,10 +333,18 @@ int main(int argc, char *argv[])
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
         uploadPool.shutdown();
+
+        
         // Force 100% display
         printProgressBar("Uploading", totalUploadSize, totalUploadSize, (totalUploadSize / 1024.0 / 1024.0) / std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count());
         std::cout << "\nUpload complete." << std::endl;
     }
+
+    if (mode == "sync") {
+    std::cout << "\n[Cooldown] Allowing remote 1TB drive to flush write buffers..." << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(10)); 
+}
+
 
     if (mode == "download" || mode == "sync")
     {
@@ -379,7 +398,7 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        ThreadPool downloadPool(8);
+        ThreadPool downloadPool(optimalThreads);
         std::map<int, Chunk> received;
         std::mutex mtxMap;
         std::atomic<long long> downloadedBytes(0);

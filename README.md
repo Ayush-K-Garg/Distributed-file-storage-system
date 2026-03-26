@@ -31,7 +31,7 @@ The system follows a decentralized cluster architecture with three main componen
 - Central interface for all file operations, supporting both absolute and relative paths.
 - **Adaptive Chunking:** Dynamically scales chunk sizes from 1 MB up to 128 MB based on file size to optimize HDD throughput.
 - **Smart Routing:** Automatically detects whether a node is local, Docker-based, or remote.
-- Uses a `ThreadPool` (8 threads) for parallel I/O.
+- Uses a `ThreadPool` (2/8 threads) for parallel I/O.
 
 ### Metadata Registry (MetaServer)
 
@@ -134,8 +134,8 @@ For a 1 TB mechanical HDD, writing thousands of small files causes disk thrashin
 
 ### Parallel Transfer Engine
 
-- Custom `ThreadPool` with 8 threads for concurrent multi-stream TCP transfers.
-- Local transfer speeds of approximately **1.1 GB/s**.
+- Custom `ThreadPool` with 2/8 threads for concurrent multi-stream TCP transfers.
+- Local transfer speeds of approximately **1.1 GB/s** and speed across multiple computers approximated=ly **5-6 MB/s** (increased using reducing threads to 2 by reducing overhead of context switching)
 - **End-to-End Integrity:** SHA-256 verification ensures data consistency across all nodes, including remote ones.
 - **Metadata Journaling:** Persistent cluster state saved in `data/registry.db`, surviving full restarts.
 - **Replication Factor (RF = 2):** Every chunk is written to two independent nodes, ensuring data availability during single-node failures.
@@ -272,7 +272,7 @@ Once running, the server node automatically joins the cluster by registering wit
 |--------|-------|
 | Local Transfer Speed | ~1.1 GB/s |
 | Replication Factor | 2 |
-| Thread Pool Size | 8 threads |
+| Thread Pool Size | 8 threads for local | 2 threads for multi device
 | Chunk Size (Adaptive) | 1 MB to 128 MB (dynamic) |
 | Heartbeat Interval | 2 seconds |
 | MetaServer Port | 8001 |
