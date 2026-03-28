@@ -22,15 +22,21 @@ std::condition_variable cv;
 // Helper to send signals to the MetaServer
 void notifyMeta(int myPort, std::string cmd)
 {
+    // 1. Get the MetaServer's location
     const char *hostEnv = std::getenv("META_HOST");
     std::string metaHost = (hostEnv == nullptr) ? "127.0.0.1" : hostEnv;
+
+    // 2. NEW: Get our OWN "Public" identity (Optional)
+    // If running in Docker or across Tailscale, set this in your environment
+    const char *myIpEnv = std::getenv("MY_IP");
+    std::string myIP = (myIpEnv == nullptr) ? "" : myIpEnv;
 
     SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr = {0}; 
     addr.sin_family = AF_INET;
     addr.sin_port = htons(8001);
 
-    // Resolution logic handles Tailscale hostnames, LAN IPs, and Localhost
+    // Resolution logic
     struct hostent* he = gethostbyname(metaHost.c_str());
     if (he != nullptr) {
         memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
@@ -40,8 +46,16 @@ void notifyMeta(int myPort, std::string cmd)
 
     if (connect(sock, (sockaddr *)&addr, sizeof(addr)) == 0)
     {
-        SetTcpNoDelay(sock); // Ensure fast handshake
+        SetTcpNoDelay(sock); 
+        
+        // 3. Construct the "Universal Message"
+        // If myIP is empty, it sends "JOIN 9001" (Backward Compatible)
+        // If myIP is set, it sends "JOIN 9001 100.x.x.x" (Docker/Global Fix)
         std::string msg = cmd + " " + std::to_string(myPort);
+        if (!myIP.empty()) {
+            msg += " " + myIP;
+        }
+
         send(sock, msg.c_str(), (int)msg.size() + 1, 0);
     }
     

@@ -191,7 +191,6 @@ int main(int argc, char *argv[])
     std::string filepath = argv[2];
     std::string filename = extractFileName(filepath);
 
-    // Track both IP and Port for nodes
     std::vector<StorageNode> liveNodes;
     SOCKET liveSock = connectToServer(metaHost, 8001);
     if (liveSock != INVALID_SOCKET)
@@ -219,7 +218,7 @@ int main(int argc, char *argv[])
     bool hasRemoteNodes = false;
     for (const auto &n : liveNodes)
     {
-        // Detect if nodes are on a different physical device (LAN, Tailscale, etc)
+        // Improved detection: Docker and Localhost are "Near", Tailscale/LAN are "Remote"
         if (n.ip.substr(0, 3) != "127" && n.ip.substr(0, 4) != "172.")
         {
             hasRemoteNodes = true;
@@ -293,7 +292,7 @@ int main(int argc, char *argv[])
                     int retries = 3;
                     while (retries-- > 0 && !success) {
                         std::string targetIP = node.ip;
-                        // Handle internal Docker routing for same-machine setups
+                        // SMART ROUTING: Only swap 172. to 127.0.0.1 if we are local to the MetaServer
                         if (targetIP.substr(0, 4) == "172." && (metaHost == "127.0.0.1" || metaHost == "localhost")) {
                             targetIP = "127.0.0.1";
                         }
@@ -397,6 +396,7 @@ int main(int argc, char *argv[])
                 for (int attempt = 0; attempt < retries && !success; attempt++) {
                     for (auto &loc : locations) {
                         std::string targetIP = loc.first;
+                        // SMART ROUTING: Again, only swap for local Docker
                         if (targetIP.substr(0, 4) == "172." && (metaHost == "127.0.0.1" || metaHost == "localhost")) {
                             targetIP = "127.0.0.1";
                         }

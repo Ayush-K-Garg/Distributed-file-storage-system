@@ -11,7 +11,6 @@
 #include <algorithm>
 #include "../common/utils/SocketWrapper.h" 
 
-// --- DATA STRUCTURES ---
 
 struct FileEntry {
     std::string hash;
@@ -132,8 +131,6 @@ int main() {
         SetTcpNoDelay(client);
 
         // --- UNIVERSAL IP DETECTION ---
-        // This captures the IP of the sender automatically. 
-        // 127.0.0.1 for local, 172.x for Docker, 100.x for Tailscale, 192.x for LAN.
         std::string senderIP = inet_ntoa(client_addr.sin_addr);
 
         char buffer[1024] = {0};
@@ -146,13 +143,21 @@ int main() {
 
         if (command == "JOIN" || command == "HEARTBEAT") {
             int port; ss >> port;
-            std::lock_guard<std::mutex> lock(globalMtx);
             
-            // Map the port to the REAL detected IP
-            liveNodes[port] = {senderIP, std::time(nullptr)};
+            // If the node reports its own IP (e.g. JOIN 9005 100.x.x.x), use it.
+            // This bypasses Docker NAT masquerading.
+            std::string reportedIP;
+            if (ss >> reportedIP) {
+                cleanString(reportedIP);
+            } else {
+                reportedIP = senderIP; // Fallback for native/LAN terminal nodes
+            }
+
+            std::lock_guard<std::mutex> lock(globalMtx);
+            liveNodes[port] = {reportedIP, std::time(nullptr)};
             
             if (command == "JOIN") {
-                std::cout << "+++ Node " << senderIP << ":" << port << " joined +++" << std::endl;
+                std::cout << "+++ Node " << reportedIP << ":" << port << " joined +++" << std::endl;
             }
         }
         else if (command == "GET_LIVE_NODES") {
@@ -220,7 +225,6 @@ int main() {
                     sendAll(client, (char*)&count, sizeof(count));
 
                     for (int port : filteredPorts) {
-                        // Dynamically look up the IP based on the port
                         std::string nodeIP = liveNodes[port].ip;
                         int ipLen = (int)nodeIP.size();
                         sendAll(client, (char*)&ipLen, sizeof(ipLen));

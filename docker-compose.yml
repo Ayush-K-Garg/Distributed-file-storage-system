@@ -1,10 +1,13 @@
-
-
 services:
   meta-server:
     build:
       context: .
       dockerfile: metadata_server/Dockerfile
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1G
     ports:
       - "8001:8001"
     volumes:
@@ -16,6 +19,8 @@ services:
       dockerfile: storage_node/Dockerfile
     environment:
       - META_HOST=meta-server
+      
+      - MY_IP=Tailscale Host / server computer ip
     ports:
       - "9001:9001" 
     command: ["./node_app", "9001", "data/node1"]
@@ -23,6 +28,8 @@ services:
       - meta-server
     volumes:
       - ./data/node1:/usr/src/app/data/node1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   node2:
     build:
@@ -30,6 +37,7 @@ services:
       dockerfile: storage_node/Dockerfile
     environment:
       - META_HOST=meta-server
+      - MY_IP=Tailscale Host / server computer ip
     ports:
       - "9002:9002" 
     command: ["./node_app", "9002", "data/node2"]
@@ -37,3 +45,5 @@ services:
       - meta-server
     volumes:
       - ./data/node2:/usr/src/app/data/node2
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
