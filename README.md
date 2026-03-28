@@ -108,6 +108,24 @@ The system handles four distinct network environments simultaneously via a unifi
 
 ---
 
+## Advanced NAT Traversal and Docker Masquerade Bypass
+ 
+A common challenge in containerized distributed systems is IP Masquerading, where the Docker Gateway (`172.18.0.1`) hides the actual identity of a node. This system implements a **Self-Reporting Identity Protocol** to ensure global reachability.
+ 
+### Explicit IP Reporting (`MY_IP`)
+ 
+Storage nodes detect their own environment at startup and explicitly report their Tailscale or LAN IP to the MetaServer. This bypasses the Docker NAT mask entirely, allowing the MetaServer to register the node's globally reachable address — whether a LAN `192.168.x.x` or a Tailscale `100.x.x.x` — instead of its internal container address that would otherwise be invisible to the rest of the cluster.
+ 
+### OOM Resilience (Code 137 Protection)
+ 
+The orchestration layer applies strict memory limits and resource reservations to every container. This prevents the Metadata Server from being forcibly terminated by the Docker engine (exit code 137 — Out of Memory kill) during high-load indexing operations or large file metadata transfers, which can produce sudden spikes in heap usage.
+ 
+### Automatic Handshake Fallback
+ 
+The system maintains full backward compatibility for zero-configuration local testing. If no `META_HOST` or `MY_IP` environment variables are detected at startup, the node automatically falls back to socket-level IP detection. This ensures that running a bare `.\node_app` in a local terminal requires no configuration whatsoever, while the same binary supports full global deployment when environment variables are present.
+
+---
+
 ## Performance and Hardware Optimizations
 
 ### Low-Latency Networking (TCP_NODELAY)
@@ -295,16 +313,44 @@ To use a server machine in a different location as a dedicated 1 TB storage vaul
 3. Identify the host machine's Tailscale IP from the Tailscale admin dashboard (e.g., `100.80.1.2`).
 4. Create the storage directory `D:/CloudVault` on the server machine.
 
-**Server Machine — `docker-compose.yml` Configuration (Global)**
+**Host Machine — `docker-compose.yml` Configuration**
+
+Runs the Metadata Server and local storage workers.
+
+- **Key Logic:** The MetaServer is protected with a 1 GB RAM limit to prevent Code 137 (OOM) crashes. Local nodes explicitly report their public-facing IP via `MY_IP` to bypass Docker NAT masquerading.
+
 ```yaml
 services:
-  node_global:
-    build: .
+  meta-server:
+    deploy:
+      resources:
+        limits:
+          memory: 1G       
+    ports:
+      - "8001:8001"
+
+  node1:
     environment:
-      - META_HOST=100.80.1.2  # Tailscale IP of the host machine
+      - META_HOST=meta-server        
+      - MY_IP=<MASTER_TAILSCALE_IP>  
+    ports:
+      - "9001:9001"
+```
+
+**Server Machine — `docker-compose.yml` Configuration (Global)**
+
+Runs independent storage nodes that connect to the host machine over the global Tailscale tunnel.
+
+- **Key Logic:** These nodes point to the host machine's global Tailscale IP for MetaServer discovery but report their own unique mesh IP for direct data routing.
+
+```yaml
+services:
+  node_remote:
+    environment:
+      - META_HOST=<MASTER_TAILSCALE_IP>  
+      - MY_IP=<NODE_TAILSCALE_IP>        
     ports:
       - "9005:9005"
-    command: ["./node_app", "9005", "data/node1"]
     volumes:
       - D:/CloudVault/node1:/usr/src/app/data/node1
 ```
@@ -353,6 +399,8 @@ Once running, the server node registers with the MetaServer on the host machine 
 - Implemented end-to-end data integrity using SHA-256 checksums across all replicated nodes, including remote ones.
 - Optimized for real-world hardware constraints including mechanical HDD sequential write performance via adaptive chunking and reduced thread contention.
 - Gained practical experience with Docker volume mapping and container networking for distributed storage workloads.
+- **Network Address Translation (NAT):** Successfully implemented an identity-reporting protocol to bypass Docker Bridge NAT masquerading, enabling seamless peer-to-peer communication between containers across different physical hardware.
+
 
 ---
 
