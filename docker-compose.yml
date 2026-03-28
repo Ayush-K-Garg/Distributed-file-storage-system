@@ -18,9 +18,8 @@ services:
       context: .
       dockerfile: storage_node/Dockerfile
     environment:
-      - META_HOST=meta-server
-      
-      - MY_IP=Tailscale Host / server computer ip
+      - META_HOST=${META_HOST}
+      - MY_IP=${MY_IP}
     ports:
       - "9001:9001" 
     command: ["./node_app", "9001", "data/node1"]
@@ -36,8 +35,8 @@ services:
       context: .
       dockerfile: storage_node/Dockerfile
     environment:
-      - META_HOST=meta-server
-      - MY_IP=Tailscale Host / server computer ip
+      - META_HOST=${META_HOST}
+      - MY_IP=${MY_IP}
     ports:
       - "9002:9002" 
     command: ["./node_app", "9002", "data/node2"]
