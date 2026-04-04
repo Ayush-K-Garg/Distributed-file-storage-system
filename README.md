@@ -1,5 +1,7 @@
 # Distributed High-Performance File Storage System (C++)
 
+A C++ distributed storage cluster that turns multiple computers into one private cloud. It uses a 'Master-Node' architecture to break files into chunks and spread them across different devices (Windows/Linux) for better privacy. A central registry tracks all filenames and locations, allowing users to access their data securely from anywhere via a Mesh VPN.
+
 A robust, self-healing, multi-threaded distributed storage system built in C++ using TCP sockets. This system achieves high-speed data transfer through parallel chunking, thread pooling, replication (RF = 2), and end-to-end integrity verification (SHA-256). It is built on a Universal Multi-Node Architecture, supporting deployment across local terminals, Docker environments, LAN (same Wi-Fi), and Global Networks (different Wi-Fi via Tailscale VPN) simultaneously.
 
 ---
