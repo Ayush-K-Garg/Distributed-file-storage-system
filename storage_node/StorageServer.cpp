@@ -8,12 +8,15 @@
 #include <condition_variable>
 #include <algorithm>
 #include <chrono>
+#include <filesystem> 
 #include "../common/utils/SocketWrapper.h"
 
 #ifndef _WIN32
 #include <netdb.h>
 #include <cstring>
 #endif
+
+namespace fs = std::filesystem;
 
 std::queue<SOCKET> taskQueue;
 std::mutex mtx;
@@ -121,6 +124,20 @@ void worker(int port, std::string folder)
         std::string cmd(command);
         if (cmd == "UPLOAD")
         {
+            // --- SPACE GUARD CHECK ---
+            const char* minSpaceEnv = std::getenv("MIN_FREE_SPACE_GB");
+            long long minSpaceGB = (minSpaceEnv) ? std::stoll(minSpaceEnv) : 5;
+            long long minFreeBytes = minSpaceGB * 1024LL * 1024 * 1024;
+
+            try {
+                fs::space_info si = fs::space(folder);
+                if (si.available < minFreeBytes) {
+                    std::cout << "[PORT " << port << "] ERROR: Insufficient space. Node requires " << minSpaceGB << "GB free." << std::endl;
+                    CLOSE_SOCKET(client_socket);
+                    continue;
+                }
+            } catch(...) {  }
+
             int nameLen;
             recvAll(client_socket, (char *)&nameLen, sizeof(nameLen));
             std::vector<char> nBuf(nameLen);
@@ -187,16 +204,37 @@ void worker(int port, std::string folder)
 
 int main(int argc, char *argv[])
 {
-    if (argc < 3)
-        return 1;
-    int port = atoi(argv[1]);
-    std::string folder = argv[2];
+    
+    int port;
+    std::string folder;
+
+    if (argc >= 3) {
+        port = atoi(argv[1]);
+        folder = argv[2];
+    } else {
+        const char* pEnv = std::getenv("NODE_PORT_1");
+        const char* fEnv = std::getenv("NODE_STORAGE_1");
+        if (pEnv && fEnv) {
+            port = atoi(pEnv);
+            folder = fEnv;
+        } else {
+            std::cout << "Usage: node_app <port> <folder> OR set NODE_PORT_1 and NODE_STORAGE_1" << std::endl;
+            return 1;
+        }
+    }
 
     if (!InitializeSockets())
         return 1;
 
-    MKDIR("data");
-    MKDIR(folder.c_str());
+    
+    try {
+        if (!fs::exists(folder)) {
+            fs::create_directories(folder);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error creating storage directory: " << e.what() << std::endl;
+        return 1;
+    }
 
     // Connect to MetaServer using the environment variable (Localhost/Tailscale/LAN)
     notifyMeta(port, "JOIN");

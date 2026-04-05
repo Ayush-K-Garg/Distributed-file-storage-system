@@ -4,45 +4,35 @@ services:
       context: .
       dockerfile: metadata_server/Dockerfile
     restart: always
+    environment:
+      - META_PORT=8001
     deploy:
       resources:
         limits:
           memory: 1G
     ports:
-      - "8001:8001"
+      - "${META_PORT:-8001}:8001"
     volumes:
-      - ./data/meta:/usr/src/app/data 
+      - ./data:/usr/src/app/data 
 
   node1:
     build:
       context: .
       dockerfile: storage_node/Dockerfile
+    restart: always
     environment:
-      - META_HOST=${META_HOST}
+      - META_HOST=meta-server
+      - META_PORT=8001
       - MY_IP=${MY_IP}
+      - MIN_FREE_SPACE_GB=${MIN_FREE_SPACE_GB:-5}
+      - NODE_PORT_1=${NODE_PORT_1:-9001}
+      - NODE_STORAGE_1=data/storage
     ports:
-      - "9001:9001" 
-    command: ["./node_app", "9001", "data/node1"]
+      - "${NODE_PORT_1:-9001}:${NODE_PORT_1:-9001}"
+    command: ["./node_app", "${NODE_PORT_1:-9001}", "data/storage"]
     depends_on:
       - meta-server
     volumes:
-      - ./data/node1:/usr/src/app/data/node1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-  node2:
-    build:
-      context: .
-      dockerfile: storage_node/Dockerfile
-    environment:
-      - META_HOST=${META_HOST}
-      - MY_IP=${MY_IP}
-    ports:
-      - "9002:9002" 
-    command: ["./node_app", "9002", "data/node2"]
-    depends_on:
-      - meta-server
-    volumes:
-      - ./data/node2:/usr/src/app/data/node2
+      - ${NODE_STORAGE_1:-./data/node1}:/usr/src/app/data/storage
     extra_hosts:
       - "host.docker.internal:host-gateway"

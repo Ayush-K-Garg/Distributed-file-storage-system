@@ -15,9 +15,12 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <filesystem>
 #include "../common/services/FileChunker.h"
 #include "../common/utils/SHA256.h"
 #include "../common/utils/SocketWrapper.h"
+
+namespace fs = std::filesystem;
 
 // --- UTILS ---
 
@@ -27,12 +30,37 @@ struct StorageNode
     int port;
 };
 
-// Minimal cleaner to ensure "file.txt" is the same on Windows and Linux/Docker
 void cleanString(std::string &s)
 {
     s.erase(std::remove(s.begin(), s.end(), '\0'), s.end());
     s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
     s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
+}
+
+const char *envBuf = std::getenv("SAFETY_BUFFER_GB");
+long long gbValue = (envBuf) ? std::stoll(envBuf) : 4;
+
+bool hasEnoughLocalSpace(long long requiredBytes, std::string path)
+{
+    try
+    {
+        fs::space_info si = fs::space(path);
+        long long safetyBuffer = gbValue * 1024LL * 1024 * 1024;
+        return si.available > (requiredBytes + safetyBuffer);
+    }
+    catch (...)
+    {
+        return true;
+    }
+}
+
+std::string getTimeAgo(std::time_t then)
+{
+    std::time_t now = std::time(nullptr);
+    double seconds = std::difftime(now, then);
+    if (seconds < 1)
+        return "just now";
+    return std::to_string((int)seconds) + "s ago";
 }
 
 bool recvAll(SOCKET sock, char *buffer, int size)
@@ -92,7 +120,7 @@ std::string extractFileName(const std::string &path)
 {
     size_t pos = path.find_last_of("/\\");
     std::string fname = (pos == std::string::npos) ? path : path.substr(pos + 1);
-    cleanString(fname); // Ensure no hidden chars
+    cleanString(fname);
     return fname;
 }
 
@@ -178,27 +206,85 @@ int main(int argc, char *argv[])
     if (!InitializeSockets())
         return 1;
 
-    if (argc < 3)
+    if (argc < 2)
     {
-        std::cout << "Usage: client_app upload|download|sync <filepath>" << std::endl;
+        std::cout << "Usage: client_app <mode> [filepath]" << std::endl;
+        std::cout << "Modes: upload, download, list, sync" << std::endl;
         return 1;
     }
 
     const char *envHost = std::getenv("META_HOST");
     std::string metaHost = (envHost == nullptr) ? "127.0.0.1" : envHost;
 
+    const char *envPort = std::getenv("META_PORT");
+    int metaPort = (envPort == nullptr) ? 8001 : std::stoi(envPort);
+
+    const char *envUpDir = std::getenv("UPLOAD_DIR");
+    std::string uploadDir = (envUpDir == nullptr) ? "." : envUpDir;
+
+    const char *envDownDir = std::getenv("DOWNLOAD_DIR");
+    std::string downloadDir = (envDownDir == nullptr) ? "." : envDownDir;
+
     std::string mode = argv[1];
+
+    if (mode == "list")
+    {
+        SOCKET listSock = connectToServer(metaHost, metaPort);
+        if (listSock == INVALID_SOCKET)
+        {
+            std::cout << "Error: Master Server Offline." << std::endl;
+            return 1;
+        }
+        std::string req = "LIST";
+        sendAll(listSock, req.c_str(), (int)req.size() + 1);
+        char buffer[4096] = {0};
+        int bytes = recv(listSock, buffer, sizeof(buffer) - 1, 0);
+        if (bytes > 0)
+            std::cout << buffer << std::endl;
+        CLOSE_SOCKET(listSock);
+        return 0;
+    }
+
+    if (mode == "nodes")
+    {
+        SOCKET nodeSock = connectToServer(metaHost, metaPort);
+        if (nodeSock == INVALID_SOCKET)
+        {
+            std::cout << "Error: Master Server Offline." << std::endl;
+            return 1;
+        }
+
+        std::string req = "NODES";
+        sendAll(nodeSock, req.c_str(), (int)req.size() + 1);
+
+        char buffer[4096] = {0};
+        int bytes = recv(nodeSock, buffer, sizeof(buffer) - 1, 0);
+        if (bytes > 0)
+        {
+            std::cout << buffer << std::endl;
+        }
+
+        CLOSE_SOCKET(nodeSock);
+        return 0;
+    }
+
+    if (argc < 3)
+    {
+        std::cout << "Error: Filepath required for " << mode << std::endl;
+        return 1;
+    }
     std::string filepath = argv[2];
     std::string filename = extractFileName(filepath);
 
     std::vector<StorageNode> liveNodes;
-    SOCKET liveSock = connectToServer(metaHost, 8001);
+    SOCKET liveSock = connectToServer(metaHost, metaPort);
     if (liveSock != INVALID_SOCKET)
     {
         std::string req = "GET_LIVE_NODES";
         sendAll(liveSock, req.c_str(), (int)req.size() + 1);
         char buffer[2048] = {0};
         int bytes = recv(liveSock, buffer, sizeof(buffer) - 1, 0);
+
         if (bytes > 0)
         {
             std::stringstream ss(buffer);
@@ -206,19 +292,33 @@ int main(int argc, char *argv[])
             while (ss >> entry)
             {
                 size_t colon = entry.find(':');
-                if (colon != std::string::npos)
+
+                if (colon != std::string::npos && colon + 1 < entry.size())
                 {
-                    liveNodes.push_back({entry.substr(0, colon), std::stoi(entry.substr(colon + 1))});
+                    std::string ip = entry.substr(0, colon);
+                    std::string portStr = entry.substr(colon + 1);
+
+                    cleanString(portStr);
+
+                    if (!portStr.empty() && std::all_of(portStr.begin(), portStr.end(), ::isdigit))
+                    {
+                        try
+                        {
+                            liveNodes.push_back({ip, std::stoi(portStr)});
+                        }
+                        catch (...)
+                        {
+                            continue;
+                        }
+                    }
                 }
             }
         }
         CLOSE_SOCKET(liveSock);
     }
-
     bool hasRemoteNodes = false;
     for (const auto &n : liveNodes)
     {
-        // Improved detection: Docker and Localhost are "Near", Tailscale/LAN are "Remote"
         if (n.ip.substr(0, 3) != "127" && n.ip.substr(0, 4) != "172.")
         {
             hasRemoteNodes = true;
@@ -235,35 +335,55 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        std::string fileHash = SHA256::hashFile(filepath);
+        fs::path p(filepath);
+        std::string fullUploadPath;
+
+        if (p.is_absolute())
+        {
+            fullUploadPath = filepath;
+        }
+        else
+        {
+            fullUploadPath = (fs::path(uploadDir) / p).string();
+        }
+        std::string fileHash = SHA256::hashFile(fullUploadPath);
         if (fileHash == "")
         {
-            std::cout << "Error: Source file missing or unreadable." << std::endl;
+            std::cout << "Error: Source file missing or unreadable at " << fullUploadPath << std::endl;
             return 1;
         }
 
-        std::ifstream fileInfo(filepath, std::ios::binary | std::ios::ate);
+        std::ifstream fileInfo(fullUploadPath, std::ios::binary | std::ios::ate);
         long long fileSize = (long long)fileInfo.tellg();
         fileInfo.close();
 
+        // --- FULL TIER LOGIC RESTORED ---
         long long chunkSize;
-        if (fileSize < 10LL * 1024 * 1024) chunkSize = 1024 * 1024;
-        else if (fileSize < 100LL * 1024 * 1024) chunkSize = 2 * 1024 * 1024;
-        else if (fileSize < 500LL * 1024 * 1024) chunkSize = 4 * 1024 * 1024;
-        else if (fileSize < 1024LL * 1024 * 1024) chunkSize = 8 * 1024 * 1024;
-        else if (fileSize < 5LL * 1024LL * 1024 * 1024) chunkSize = 16 * 1024 * 1024;
-        else if (fileSize < 10LL * 1024LL * 1024 * 1024) chunkSize = 32 * 1024 * 1024;
-        else if (fileSize < 50LL * 1024LL * 1024 * 1024) chunkSize = 64 * 1024 * 1024;
-        else chunkSize = 128LL * 1024 * 1024;
+        if (fileSize < 10LL * 1024 * 1024)
+            chunkSize = 1024 * 1024;
+        else if (fileSize < 100LL * 1024 * 1024)
+            chunkSize = 2 * 1024 * 1024;
+        else if (fileSize < 500LL * 1024 * 1024)
+            chunkSize = 4 * 1024 * 1024;
+        else if (fileSize < 1024LL * 1024 * 1024)
+            chunkSize = 8 * 1024 * 1024;
+        else if (fileSize < 5LL * 1024LL * 1024 * 1024)
+            chunkSize = 16 * 1024 * 1024;
+        else if (fileSize < 10LL * 1024LL * 1024 * 1024)
+            chunkSize = 32 * 1024 * 1024;
+        else if (fileSize < 50LL * 1024LL * 1024 * 1024)
+            chunkSize = 64 * 1024 * 1024;
+        else
+            chunkSize = 128LL * 1024 * 1024;
 
         FileChunker chunker((int)chunkSize);
-        std::vector<Chunk> chunks = chunker.split(filepath);
+        std::vector<Chunk> chunks = chunker.split(fullUploadPath);
 
         long long totalUploadSize = 0;
         for (const auto &c : chunks)
             totalUploadSize += (c.data.size() * ((liveNodes.size() > 1) ? 2 : 1));
 
-        SOCKET metaSock = connectToServer(metaHost, 8001);
+        SOCKET metaSock = connectToServer(metaHost, metaPort);
         if (metaSock != INVALID_SOCKET)
         {
             std::string req = "REGISTER " + filename + " " + std::to_string(chunks.size()) + " " + fileHash;
@@ -287,12 +407,11 @@ int main(int argc, char *argv[])
             for (auto &node : targets)
             {
                 uploadPool.enqueue([&uploadedBytes, &chunks, i, node, filename, metaHost]()
-                {
+                                   {
                     bool success = false;
                     int retries = 3;
                     while (retries-- > 0 && !success) {
                         std::string targetIP = node.ip;
-                        // SMART ROUTING: Only swap 172. to 127.0.0.1 if we are local to the MetaServer
                         if (targetIP.substr(0, 4) == "172." && (metaHost == "127.0.0.1" || metaHost == "localhost")) {
                             targetIP = "127.0.0.1";
                         }
@@ -316,8 +435,7 @@ int main(int argc, char *argv[])
                         }
                         CLOSE_SOCKET(storSock);
                         if (!success) std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                    }
-                });
+                    } });
             }
         }
 
@@ -332,15 +450,18 @@ int main(int argc, char *argv[])
         std::cout << "\nUpload complete." << std::endl;
     }
 
-    if (mode == "sync") {
+    // --- FULL SYNC COOLDOWN RESTORED ---
+    if (mode == "sync")
+    {
         std::cout << "\n[Cooldown] Allowing remote 1TB drive to flush write buffers..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(10)); 
+        std::this_thread::sleep_for(std::chrono::seconds(10));
     }
 
     if (mode == "download" || mode == "sync")
     {
-        SOCKET metaSock = connectToServer(metaHost, 8001);
-        if (metaSock == INVALID_SOCKET) return 1;
+        SOCKET metaSock = connectToServer(metaHost, metaPort);
+        if (metaSock == INVALID_SOCKET)
+            return 1;
         std::string getReq = "GET " + filename;
         sendAll(metaSock, getReq.c_str(), (int)getReq.size() + 1);
 
@@ -358,7 +479,8 @@ int main(int argc, char *argv[])
         while (true)
         {
             int id;
-            if (!recvAll(metaSock, (char *)&id, sizeof(id)) || id == -1) break;
+            if (!recvAll(metaSock, (char *)&id, sizeof(id)) || id == -1)
+                break;
             int count;
             recvAll(metaSock, (char *)&count, sizeof(count));
             std::vector<std::pair<std::string, int>> nodeLocations;
@@ -377,7 +499,31 @@ int main(int argc, char *argv[])
         }
         CLOSE_SOCKET(metaSock);
 
-        if (chunkMap.empty()) { std::cout << "Error: File metadata not found." << std::endl; return 1; }
+        if (chunkMap.empty())
+        {
+            std::cout << "Error: File metadata not found." << std::endl;
+            return 1;
+        }
+
+        try
+        {
+            if (!fs::exists(downloadDir))
+            {
+                fs::create_directories(downloadDir);
+                std::cout << "[System] Created directory: " << downloadDir << std::endl;
+            }
+        }
+        catch (const std::exception &e)
+        {
+            std::cout << "Error creating directory: " << e.what() << std::endl;
+            return 1;
+        }
+
+        // --- SPACE GUARD CHECK ---
+        if (!hasEnoughLocalSpace(0, downloadDir))
+        {
+            std::cout << "Warning: Local disk space is critically low in " << downloadDir << std::endl;
+        }
 
         ThreadPool downloadPool(optimalThreads);
         std::map<int, Chunk> received;
@@ -390,13 +536,12 @@ int main(int argc, char *argv[])
             int tid = p.first;
             auto locations = p.second;
             downloadPool.enqueue([&received, &mtxMap, &downloadedBytes, tid, locations, filename, metaHost]()
-            {
+                                 {
                 bool success = false;
                 int retries = 5; 
                 for (int attempt = 0; attempt < retries && !success; attempt++) {
                     for (auto &loc : locations) {
                         std::string targetIP = loc.first;
-                        // SMART ROUTING: Again, only swap for local Docker
                         if (targetIP.substr(0, 4) == "172." && (metaHost == "127.0.0.1" || metaHost == "localhost")) {
                             targetIP = "127.0.0.1";
                         }
@@ -422,15 +567,18 @@ int main(int argc, char *argv[])
                         CLOSE_SOCKET(sock);
                     }
                     if (!success) std::this_thread::sleep_for(std::chrono::milliseconds((attempt + 1) * 1000));
-                }
-            });
+                } });
         }
 
         while (true)
         {
             size_t cur;
-            { std::lock_guard<std::mutex> lock(mtxMap); cur = received.size(); }
-            if (cur == chunkMap.size()) break;
+            {
+                std::lock_guard<std::mutex> lock(mtxMap);
+                cur = received.size();
+            }
+            if (cur == chunkMap.size())
+                break;
             printProgressBar("Downloading", (long long)cur, (long long)chunkMap.size(), (downloadedBytes / 1024.0 / 1024.0) / std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count());
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
@@ -439,10 +587,13 @@ int main(int argc, char *argv[])
         printProgressBar("Downloading", chunkMap.size(), chunkMap.size(), (downloadedBytes / 1024.0 / 1024.0) / std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count());
 
         std::vector<Chunk> finalChunks;
-        for (auto &p : received) finalChunks.push_back(p.second);
-        std::string out = "downloaded_" + filename;
-        FileChunker(1024).merge(out, finalChunks);
-        if (SHA256::hashFile(out) == expectedHash)
+        for (auto &p : received)
+            finalChunks.push_back(p.second);
+
+        std::string finalOutputPath = downloadDir + "/downloaded_" + filename;
+        FileChunker(1024).merge(finalOutputPath, finalChunks);
+
+        if (SHA256::hashFile(finalOutputPath) == expectedHash)
             std::cout << "\nVerified [MATCH]." << std::endl;
         else
             std::cout << "\nVerification [FAILED] - Content mismatch." << std::endl;
